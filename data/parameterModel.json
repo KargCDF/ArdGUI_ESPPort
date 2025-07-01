@@ -1,0 +1,16 @@
+{
+  "feedRate": 600.0,
+  "loopLength": 4.0,
+  "loopHeightInput": 23.0,
+  "retractLength": 4.0,
+  "minAngle": 22.0,
+  "degSec": 0.002,
+  "riseTime": 168.2092703532876,
+  "fallTime": 168.2092703532876,
+  "yokeLength": 17.0,
+  "muSteps": 0.0625,
+  "degStep": 0.9,
+  "driveDiameter": 64.0,
+  "servoPwmMin": 650,
+  "servoPwmMax": 2610
+}

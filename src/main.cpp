@@ -1,217 +1,255 @@
-// #include <Arduino.h>
-// #include <ESP32Servo.h>
-
-// Servo myServo;
-// const int servoPin    = 13;    // change to your servo pin
-// const int stepSize    = 10;    // µs per step (try 20–50 for finer resolution)
-// const int delayMs     = 1000;   // ms between steps
-
-// void setup() {
-//   Serial.begin(115200);
-//   while(!Serial){}                // wait for Serial
-//   myServo.attach(servoPin);       // use default range for now
-//   Serial.println("=== Servo calibration sweep ===");
-//   delay(1000);
-// }
-// // 2400 max, 540 min
-// void loop() {
-//   // Sweep from 500 → 2500 µs
-// //   for (int pulse = 1500; pulse <= 2380; pulse += stepSize) {
-// //     myServo.writeMicroseconds(pulse);
-// //     Serial.print("Pulse = ");
-// //     Serial.println(pulse);
-// //     delay(delayMs);
-// //   }
-// //   Then back down 2500 → 500
-//   for (int pulse = 700; pulse >= 500; pulse -= stepSize) {
-//     myServo.writeMicroseconds(pulse);
-//     Serial.print("Pulse = ");
-//     Serial.println(pulse);
-//     delay(delayMs);
-//   }
-
-//   // once it’s run once, you can stop here if you like:
-//   while(true);
-// }
+/*  ────────────────────────────────────────────────────────────────
+    Stepper-Servo controller  ·  ESP32 version  ·  Binary protocol
+    Adds a WebSocket transport (see WebBridge.*)
+    ──────────────────────────────────────────────────────────────── */
 
 #include <Arduino.h>
+#include <cstring>
+#include "WebBridge.h"          // Wi-Fi + WS bridge (Phase-1)
 
-/*  Stepper-Servo controller – binary-protocol version  ------------------- */
-
+/* =====================  HARDWARE LIBS  ========================= */
 #include <ESP32Servo.h>
 #include <AccelStepper.h>
 
-bool yokeInverted = false;          // ← set to true for your build
+/* =====================  BUILD CONSTANTS  ======================= */
+constexpr bool     yokeInverted = false;   // true if linkage is flipped
 
-/* ----------------------- hardware pins --------------------------------- */
-constexpr uint8_t PWM_PIN = 13;   // MG90S
-constexpr uint8_t STEP_PIN = 25;  // TB6600 PUL-
-constexpr uint8_t DIR_PIN = 26;   // TB6600 DIR-
-constexpr uint8_t EN_PIN = 27;    // TB6600 EN-
-constexpr uint8_t ENDSTOP_PIN = 33;               // INT1, NC switch to GND
+/* --------── PINS ------------------------------------------------ */
+constexpr uint8_t PWM_PIN  = 13;   // SG90 / MG90S PWM
+constexpr uint8_t STEP_PIN = 25;   // TB6600 PUL-
+constexpr uint8_t DIR_PIN  = 26;   // TB6600 DIR-
+constexpr uint8_t EN_PIN   = 27;   // TB6600 EN-
+constexpr uint8_t ENDSTOP_PIN = 33;          // NC switch → GND
 
-/* ---------- debounce constants & state (top of file) ------------------ */
-constexpr unsigned long DEBOUNCE_US = 1000000;        // 1 s
-volatile unsigned long  lastEndstopMicros = 0;       // time of previous hit
+/* —— debounce for ENDSTOP —— */
+constexpr unsigned long DEBOUNCE_US = 1000000UL; // 1 s
+volatile  unsigned long lastEndstopMicros = 0;
+volatile  bool          endstopEvent      = false;
 
-/* ----------------------- run-time variables ---------------------------- */
-float riseTime = 120.48734593882432, fallTime = 120.48734593882432;
-float stayHigh = 159.02530812235136, stayLow = 715.0;
-float minAngle = 23, maxAngle = 83.24367296941217;
-float speedStepsPerSec = 39.78873577297383;
-volatile bool yokeRunning     = false;           // now volatile – seen in ISR
+/* =====================  RUN-TIME VARIABLES  ===================== */
+float riseTime   = 120.4873f, fallTime  = 120.4873f;
+float stayHigh   = 159.0253f, stayLow   = 715.0f;
+float minAngle   = 23.0f,     maxAngle  = 83.2437f;
+float speedStepsPerSec = 39.7887f;
+
+int   servoPwmMin = 600,      servoPwmMax = 2400;
+
+volatile bool yokeRunning     = false;
 volatile bool conveyorRunning = false;
-volatile bool endstopEvent    = false;           // “service me” flag
-int servoPwmMin = 600;
-int servoPwmMax = 2400;
 
-/* ----------------------- objects --------------------------------------- */
-Servo myServo;
+/* =====================  OBJECTS  ================================ */
+Servo        myServo;
 AccelStepper stepper(AccelStepper::DRIVER, STEP_PIN, DIR_PIN);
 
-/* ---------- binary-protocol parameter IDs -------------------------------- */
+/* =====================  PROTOCOL  =============================== */
 enum ParamID : uint8_t {
-  ParamID_RISE_TIME_MS = 0x01,
-  ParamID_FALL_TIME_MS = 0x02,
-  ParamID_HOLD_HIGH_MS = 0x03,
-  ParamID_HOLD_LOW_MS = 0x04,
-  ParamID_MIN_ANGLE_DEG = 0x05,
-  ParamID_MAX_ANGLE_DEG = 0x06,
-  ParamID_STEPS_PER_SEC = 0x07,
-  /* new */
-  ParamID_SERVO_PWM_MIN_US = 0x08,
-  ParamID_SERVO_PWM_MAX_US = 0x09,
-  /* run / stop */
-  ParamID_RUN_YOKE = 0x10,
-  ParamID_RUN_CONVEYOR = 0x11
+  ParamID_RISE_TIME_MS      = 0x01,
+  ParamID_FALL_TIME_MS      = 0x02,
+  ParamID_HOLD_HIGH_MS      = 0x03,
+  ParamID_HOLD_LOW_MS       = 0x04,
+  ParamID_MIN_ANGLE_DEG     = 0x05,
+  ParamID_MAX_ANGLE_DEG     = 0x06,
+  ParamID_STEPS_PER_SEC     = 0x07,
+  ParamID_SERVO_PWM_MIN_US  = 0x08,
+  ParamID_SERVO_PWM_MAX_US  = 0x09,
+  ParamID_RUN_YOKE          = 0x10,
+  ParamID_RUN_CONVEYOR      = 0x11
 };
 
-/* ----------------------- helpers --------------------------------------- */
-union FloatBytes {
-  float f;
-  uint8_t b[4];
-};
+constexpr uint8_t SYNC      = 0xAA;
+constexpr uint8_t CMD_SET   = 0x01;
+constexpr uint8_t CMD_TOGGLE= 0x02;
+constexpr uint8_t CMD_GET   = 0x03;    // host → MCU
+constexpr uint8_t CMD_ACK   = 0x81;    // MCU  → host
+
+union FloatBytes { float f; uint8_t b[4]; };
 
 struct Frame {
-  uint8_t sync, cmd, id;
+  uint8_t   sync, cmd, id;
   FloatBytes data;
-  uint8_t crc;
+  uint8_t   crc;
 };
 
-constexpr uint8_t SYNC = 0xAA;
-constexpr uint8_t CMD_SET = 0x01;
-constexpr uint8_t CMD_TOGGLE = 0x02;
-constexpr uint8_t CMD_GET   = 0x03;   // host → MCU : ask for a value
-constexpr uint8_t CMD_ACK   = 0x81;   // MCU → host : answer / acknowledge
+/* =====================  FORWARD DECLARATIONS  =================== */
+void applyParam(uint8_t id, float val);
+float readParam(uint8_t id);
+void processSerial();
+void processIncomingFrame(uint8_t *buf, size_t len);   // NEW
+void updateServo();
+void IRAM_ATTR endstopISR();
+void sendFrame(uint8_t cmd, uint8_t id, float val);
 
+/* =====================  TRANSPORT LAYER  ======================== *
+ * Build a frame once → ship it over Serial **and** WebSocket      */
+static void transmitFrame(const uint8_t *buf, size_t len)
+{
+  Serial.write(buf, len);              // USB-Serial
+  WebBridge_sendFrame(buf, len);       // Wi-Fi / browser
+}
+
+/* =====================  PARAM HELPERS  ========================== */
 inline void writeYoke(int logicalDeg)
 {
-  // If the mechanics are flipped, logical  0°..180°  becomes physical 180°..0°
   myServo.write(yokeInverted ? 180 - logicalDeg : logicalDeg);
 }
 
 float readParam(uint8_t id)
 {
   switch (id) {
-    case ParamID_RISE_TIME_MS:   return riseTime;
-    case ParamID_FALL_TIME_MS:   return fallTime;
-    case ParamID_HOLD_HIGH_MS:   return stayHigh;
-    case ParamID_HOLD_LOW_MS:    return stayLow;
-    case ParamID_MIN_ANGLE_DEG:  return minAngle;
-    case ParamID_MAX_ANGLE_DEG:  return maxAngle;
-    case ParamID_STEPS_PER_SEC:  return speedStepsPerSec;
-    case ParamID_SERVO_PWM_MIN_US:return servoPwmMin;
-    case ParamID_SERVO_PWM_MAX_US:return servoPwmMax;
-    case ParamID_RUN_YOKE:       return yokeRunning;
-    case ParamID_RUN_CONVEYOR:   return conveyorRunning;
-    default:                     return 0.0f;
+    case ParamID_RISE_TIME_MS:        return riseTime;
+    case ParamID_FALL_TIME_MS:        return fallTime;
+    case ParamID_HOLD_HIGH_MS:        return stayHigh;
+    case ParamID_HOLD_LOW_MS:         return stayLow;
+    case ParamID_MIN_ANGLE_DEG:       return minAngle;
+    case ParamID_MAX_ANGLE_DEG:       return maxAngle;
+    case ParamID_STEPS_PER_SEC:       return speedStepsPerSec;
+    case ParamID_SERVO_PWM_MIN_US:    return servoPwmMin;
+    case ParamID_SERVO_PWM_MAX_US:    return servoPwmMax;
+    case ParamID_RUN_YOKE:            return yokeRunning;
+    case ParamID_RUN_CONVEYOR:        return conveyorRunning;
+    default:                          return 0.0f;
   }
 }
 
-/* ----------------------- forward decl. --------------------------------- */
-void applyParam(uint8_t id, float val);
-void updateServo();
-void sendFrame(uint8_t cmd, uint8_t id, float val);
-void IRAM_ATTR endstopISR();
-
-/* ====================== SETUP ========================================== */
-void setup() {
-  Serial.begin(115200);
-
-  myServo.attach(PWM_PIN, servoPwmMin, servoPwmMax);
-  myServo.write(minAngle);
-
-  stepper.setPinsInverted(true, true, false);
-  stepper.setEnablePin(EN_PIN);
-  stepper.setMinPulseWidth(20);
-  stepper.enableOutputs();
-  stepper.setMaxSpeed(speedStepsPerSec);
-  stepper.setSpeed(speedStepsPerSec);
-  sendFrame(CMD_ACK, 0xFF, 0.0f);   // 0xFF = “READY”
-  pinMode(ENDSTOP_PIN, INPUT_PULLUP);            // NC → GND, pull-up inside
-  attachInterrupt(digitalPinToInterrupt(ENDSTOP_PIN),
-                  endstopISR,
-                  RISING);                       // LOW→HIGH when switch opens
-}
-
-/* ----------------------- INTERRUPT HANDLER ----------------------------- */
-// void endstopISR()
-void IRAM_ATTR endstopISR()
+/* =====================  APPLY PARAM  ============================ */
+void applyParam(uint8_t id, float val)
 {
-  unsigned long now = micros();                      // ~4 µs call
-  if (now - lastEndstopMicros >= DEBOUNCE_US) {      // ignore bounce
-    lastEndstopMicros = now;
-    endstopEvent = true;                             // serviced in loop()
+  switch (id) {
+    case ParamID_RISE_TIME_MS:   riseTime = val; break;
+    case ParamID_FALL_TIME_MS:   fallTime = val; break;
+    case ParamID_HOLD_HIGH_MS:   stayHigh = val; break;
+    case ParamID_HOLD_LOW_MS:    stayLow  = val; break;
+
+    case ParamID_MIN_ANGLE_DEG:
+      minAngle = constrain(val, 0.0f, 180.0f);
+      writeYoke(minAngle);
+      break;
+
+    case ParamID_MAX_ANGLE_DEG:
+      maxAngle = constrain(val, 0.0f, 180.0f);
+      writeYoke(maxAngle);
+      break;
+
+    case ParamID_STEPS_PER_SEC:
+      speedStepsPerSec = max(1.0f, val);
+      stepper.setMaxSpeed(speedStepsPerSec);
+      stepper.setSpeed(speedStepsPerSec);
+      break;
+
+    case ParamID_RUN_YOKE:
+      if (val != 0) {
+        yokeRunning = true;
+        myServo.attach(PWM_PIN, servoPwmMin, servoPwmMax);
+      } else {
+        yokeRunning = false;
+        myServo.detach();
+      }
+      break;
+
+    case ParamID_RUN_CONVEYOR:
+      conveyorRunning = (val != 0);
+      if (conveyorRunning) stepper.enableOutputs();
+      else                 stepper.disableOutputs();
+      break;
+
+    case ParamID_SERVO_PWM_MIN_US:
+      servoPwmMin = constrain((int)val, 100, 3000);
+      myServo.attach(PWM_PIN, servoPwmMin, servoPwmMax);
+      break;
+
+    case ParamID_SERVO_PWM_MAX_US:
+      servoPwmMax = constrain((int)val, 100, 3000);
+      myServo.attach(PWM_PIN, servoPwmMin, servoPwmMax);
+      break;
   }
 }
 
-/* ====================== PACKET PARSER ================================== */
+/* =====================  SEND FRAME  ============================ */
+void sendFrame(uint8_t cmd, uint8_t id, float val)
+{
+  uint8_t frame[1 + 1 + 1 + 4 + 1];  // SYNC,cmd,id,val,crc
+  uint8_t pos = 0;
 
-enum RxState { WAIT_SYNC,
-               READ_HDR,
-               READ_DATA,
-               READ_CRC };
-RxState rxState = WAIT_SYNC;
-Frame rxFrame;
-uint8_t idx = 0;
-uint8_t calcCrc = 0;
+  frame[pos++] = SYNC;
+  frame[pos++] = cmd;
+  frame[pos++] = id;
 
-void processSerial() {
+  FloatBytes fb{ .f = val };
+  memcpy(&frame[pos], fb.b, 4);  pos += 4;
+
+  uint8_t crc = cmd ^ id;
+  for (uint8_t b : fb.b) crc ^= b;
+  frame[pos++] = crc;
+
+  transmitFrame(frame, pos);
+}
+
+/* =====================  WS → MCU PARSER  (NEW) ================= */
+void processIncomingFrame(uint8_t *buf, size_t len)
+{
+  if (len != 8 || buf[0] != SYNC) return;         // size / preamble check
+
+  uint8_t cmd = buf[1], id = buf[2];
+  FloatBytes fb; memcpy(fb.b, &buf[3], 4);
+  uint8_t rxCrc = buf[7];
+
+  uint8_t calc = cmd ^ id;
+  for (uint8_t b : fb.b) calc ^= b;
+  if (calc != rxCrc) return;                      // CRC fail
+
+  if (cmd == CMD_SET || cmd == CMD_TOGGLE) {
+    applyParam(id, fb.f);
+    sendFrame(CMD_ACK, id, readParam(id));
+  }
+  else if (cmd == CMD_GET) {
+    if (id == 0x00) {
+      for (uint8_t pid = ParamID_RISE_TIME_MS; pid <= ParamID_RUN_CONVEYOR; ++pid)
+        sendFrame(CMD_ACK, pid, readParam(pid));
+    } else {
+      sendFrame(CMD_ACK, id, readParam(id));
+    }
+  }
+}
+
+/* =====================  SERIAL PARSER  (unchanged) ============== */
+enum RxState { WAIT_SYNC, READ_HDR, READ_DATA, READ_CRC };
+RxState   rxState = WAIT_SYNC;
+Frame     rxFrame;
+uint8_t   idx     = 0;
+uint8_t   calcCrc = 0;
+
+void processSerial()
+{
   while (Serial.available()) {
     uint8_t byteIn = Serial.read();
 
     switch (rxState) {
       case WAIT_SYNC:
-        if (byteIn == SYNC) {
-          rxState = READ_HDR;
-          idx = 0;
-          calcCrc = 0;
-        }
+        if (byteIn == SYNC) { rxState = READ_HDR; idx = 0; calcCrc = 0; }
         break;
 
       case READ_HDR:
-          if (idx == 0) rxFrame.cmd = byteIn;
-          else          rxFrame.id  = byteIn;
-          calcCrc ^= byteIn;
-          if (++idx == 2) { rxState = READ_DATA; idx = 0; }
-          break;
+        if (idx == 0) rxFrame.cmd = byteIn; else rxFrame.id = byteIn;
+        calcCrc ^= byteIn;
+        if (++idx == 2) { rxState = READ_DATA; idx = 0; }
+        break;
 
-      case READ_DATA:  // 4 data bytes
+      case READ_DATA:
         rxFrame.data.b[idx++] = byteIn;
         calcCrc ^= byteIn;
         if (idx == 4) rxState = READ_CRC;
         break;
 
       case READ_CRC:
-        if (calcCrc == byteIn) {                 // ← good packet
-          if      (rxFrame.cmd == CMD_SET || rxFrame.cmd == CMD_TOGGLE) {
+        if (calcCrc == byteIn) {
+          if (rxFrame.cmd == CMD_SET || rxFrame.cmd == CMD_TOGGLE) {
             applyParam(rxFrame.id, rxFrame.data.f);
-            sendFrame(CMD_ACK, rxFrame.id, readParam(rxFrame.id));   // <—
+            sendFrame(CMD_ACK, rxFrame.id, readParam(rxFrame.id));
           }
           else if (rxFrame.cmd == CMD_GET) {
-            if (rxFrame.id == 0x00) {            // 0 → dump everything
-              for (uint8_t id = ParamID_RISE_TIME_MS; id <= ParamID_RUN_CONVEYOR; ++id)
-                sendFrame(CMD_ACK, id, readParam(id));
+            if (rxFrame.id == 0x00) {
+              for (uint8_t pid = ParamID_RISE_TIME_MS; pid <= ParamID_RUN_CONVEYOR; ++pid)
+                sendFrame(CMD_ACK, pid, readParam(pid));
             } else {
               sendFrame(CMD_ACK, rxFrame.id, readParam(rxFrame.id));
             }
@@ -223,25 +261,22 @@ void processSerial() {
   }
 }
 
-/* ====================== SERVO STATE MACHINE ============================ */
-
+/* =====================  SERVO STATE MACHINE  ==================== */
 enum SweepState { S_IDLE, S_RISE, S_HIGH, S_FALL, S_LOW };
 SweepState sState = S_IDLE;
 unsigned long lastEvent = 0;
 unsigned long stepDelay = 0;
-int currAngle = 0;
+int  currAngle = 0;
 
 void updateServo()
 {
   if (!yokeRunning) { sState = S_IDLE; return; }
 
-  const int dirUp   = yokeInverted ? -1 : +1;   // which way is “rise”?
-  const int dirDown = -dirUp;                   // opposite for “fall”
-
+  const int dirUp   = yokeInverted ? -1 : +1;
+  const int dirDown = -dirUp;
   unsigned long now = millis();
 
   switch (sState) {
-
     case S_IDLE:
       currAngle = yokeInverted ? maxAngle : minAngle;
       writeYoke(currAngle);
@@ -296,107 +331,60 @@ void updateServo()
   }
 }
 
-/* ====================== PARAM HANDLER ================================== */
-
- void applyParam(uint8_t id, float val) {
-   switch (id) {
-     case ParamID_RISE_TIME_MS: 
-       riseTime = val; 
-       break;
-     case ParamID_FALL_TIME_MS: 
-       fallTime = val; 
-       break;
-     case ParamID_HOLD_HIGH_MS: 
-       stayHigh = val; 
-       break;
-     case ParamID_HOLD_LOW_MS: 
-       stayLow = val; 
-       break;
-
-     case ParamID_MIN_ANGLE_DEG:
-       minAngle = constrain(val, 0.0f, 180.0f);
-       // preview bottom position immediately
-       writeYoke(minAngle);
-       break;
-
-     case ParamID_MAX_ANGLE_DEG:
-       maxAngle = constrain(val, 0.0f, 180.0f);
-       // preview top position immediately
-       writeYoke(maxAngle);
-       break;
-
-     case ParamID_STEPS_PER_SEC:
-       speedStepsPerSec = max(1.0f, val);
-       stepper.setMaxSpeed(speedStepsPerSec);
-       stepper.setSpeed(speedStepsPerSec);
-       break;
-
-     case ParamID_RUN_YOKE:
-       if (val != 0) {
-         yokeRunning = true;
-         myServo.attach(PWM_PIN, servoPwmMin, servoPwmMax);
-         sState = S_IDLE;
-       } else {
-         yokeRunning = false;
-         myServo.detach();
-       }
-       break;
-
-     case ParamID_RUN_CONVEYOR:
-       conveyorRunning = (val != 0);
-       if (conveyorRunning) stepper.enableOutputs();
-       else               stepper.disableOutputs();
-       break;
-
-     case ParamID_SERVO_PWM_MIN_US:
-       servoPwmMin = constrain((int)val, 100, 3000);
-       myServo.attach(PWM_PIN, servoPwmMin, servoPwmMax);
-       break;
-
-     case ParamID_SERVO_PWM_MAX_US:
-       servoPwmMax = constrain((int)val, 100, 3000);
-       myServo.attach(PWM_PIN, servoPwmMin, servoPwmMax);
-       break;
-   }
- }
-
-/* ====================== SEND FRAME ====================================== */
-
-void sendFrame(uint8_t cmd, uint8_t id, float val)
+/* =====================  SETUP  ================================= */
+void setup()
 {
-  uint8_t crc = cmd ^ id;
-  FloatBytes fb{ .f = val };
-  for (uint8_t b : fb.b) crc ^= b;
+  Serial.begin(115200);
 
-  Serial.write(SYNC);
-  Serial.write(cmd);
-  Serial.write(id);
-  Serial.write(fb.b, 4);
-  Serial.write(crc);
+  myServo.attach(PWM_PIN, servoPwmMin, servoPwmMax);
+  myServo.write(minAngle);
+
+  stepper.setPinsInverted(true, true, false);
+  stepper.setEnablePin(EN_PIN);
+  stepper.setMinPulseWidth(20);
+  stepper.enableOutputs();
+  stepper.setMaxSpeed(speedStepsPerSec);
+  stepper.setSpeed(speedStepsPerSec);
+
+  pinMode(ENDSTOP_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(ENDSTOP_PIN), endstopISR, RISING);
+
+  WebBridge_begin();          // ★ bring up Wi-Fi + WS
+  sendFrame(CMD_ACK, 0xFF, 0.0f);   // “READY”
 }
 
-/* ====================== MAIN LOOP ====================================== */
-void loop() {
+/* =====================  LOOP  ================================= */
+void loop()
+{
   processSerial();
   updateServo();
   if (conveyorRunning) stepper.runSpeed();
 
-  /* --------- handle end-stop event with the *existing* logic --------- */
+  /* ------ ENDSTOP event (debounced in ISR) ------ */
   if (endstopEvent) {
-    noInterrupts();                // atomic clear of the flag
+    noInterrupts();
     endstopEvent = false;
     interrupts();
 
-    /* toggle Yoke ------------------------------------------------------ */
     float newYokeState = yokeRunning ? 0.0f : 1.0f;
     applyParam(ParamID_RUN_YOKE, newYokeState);
 
-    /* toggle Conveyor -------------------------------------------------- */
     float newConvState = conveyorRunning ? 0.0f : 1.0f;
     applyParam(ParamID_RUN_CONVEYOR, newConvState);
 
-    /* (optional) tell the host what just happened --------------------- */
-    sendFrame(CMD_ACK, ParamID_RUN_YOKE, newYokeState);
-    sendFrame(CMD_ACK, ParamID_RUN_CONVEYOR, newConvState);
+    sendFrame(CMD_ACK, ParamID_RUN_YOKE,      newYokeState);
+    sendFrame(CMD_ACK, ParamID_RUN_CONVEYOR,  newConvState);
+  }
+
+  WebBridge_loop();           // ★ house-keeping for AsyncWebServer
+}
+
+/* =====================  ISR  ================================== */
+void IRAM_ATTR endstopISR()
+{
+  unsigned long now = micros();
+  if (now - lastEndstopMicros >= DEBOUNCE_US) {
+    lastEndstopMicros = now;
+    endstopEvent = true;
   }
 }

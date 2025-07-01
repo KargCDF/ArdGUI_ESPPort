@@ -1,0 +1,13 @@
+#app {
+  flex-wrap: wrap;
+}
+#app h3 {
+  margin-top: 0;
+}
+label {
+  display: block;
+  margin-bottom: 4px;
+}
+input {
+  width: 110px;
+}

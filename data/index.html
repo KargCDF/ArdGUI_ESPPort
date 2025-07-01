@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Stepper-Servo Controller</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <style>
+      body {
+        font-family: sans-serif;
+        background: #eee;
+        color: #111;
+        padding: 1em;
+      }
+      section {
+        display: inline-block;
+        vertical-align: top;
+        margin-right: 2em;
+      }
+      label {
+        display: block;
+        margin: 0.5em 0;
+      }
+      input[type="number"] {
+        width: 6em;
+      }
+      output {
+        display: inline-block;
+        width: 6em;
+        background: #fff;
+        padding: 0.2em;
+        border-radius: 3px;
+      }
+      textarea {
+        width: 100%;
+        height: 8em;
+        margin-top: 1em;
+        font-family: monospace;
+      }
+      button {
+        margin-right: 0.5em;
+      }
+      fieldset {
+        border: 1px solid #ccc;
+        padding: 0.5em;
+      }
+      legend {
+        font-weight: bold;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>Stepper-Servo Controller</h2>
+
+    <section>
+      <fieldset>
+        <legend>Derived</legend>
+        <p>Loop Height [mm]: <output id="out_loopHeight">—</output></p>
+        <p>Hold High [ms]: <output id="out_holdHigh">—</output></p>
+        <p>Hold Low [ms]: <output id="out_holdLow">—</output></p>
+        <p>Steps/sec: <output id="out_stepsSec">—</output></p>
+        <p>Min Time [ms]: <output id="out_minTime">—</output></p>
+        <p>Max Angle [°]: <output id="out_maxAngle">—</output></p>
+      </fieldset>
+    </section>
+
+    <section>
+      <fieldset>
+        <legend>Parameters</legend>
+        <label
+          >Feed Rate (mm/min):
+          <input name="feedRate" type="number" step="1" disabled
+        /></label>
+        <label
+          >Loop Height (mm):
+          <input name="loopHeightInput" type="number" step="0.1" disabled
+        /></label>
+        <label
+          >Loop Length (mm):
+          <input name="loopLength" type="number" step="0.1" disabled
+        /></label>
+        <label
+          >Retract Length (mm):
+          <input name="retractLength" type="number" step="0.1" disabled
+        /></label>
+      </fieldset>
+    </section>
+
+    <section>
+      <fieldset>
+        <legend>Configuration</legend>
+        <label
+          >Min Angle (°):
+          <input name="minAngle" type="number" step="1" disabled
+        /></label>
+        <label
+          >deg/sec (s/°):
+          <input name="degSec" type="number" step="0.0001" disabled
+        /></label>
+        <label
+          >Rise Time (ms):
+          <input name="riseTime" type="number" step="1" disabled
+        /></label>
+        <label
+          >Fall Time (ms):
+          <input name="fallTime" type="number" step="1" disabled
+        /></label>
+        <label
+          >Yoke Length (mm):
+          <input name="yokeLength" type="number" step="0.1" disabled
+        /></label>
+        <label
+          >µ-steps: <input name="muSteps" type="number" step="0.5" disabled
+        /></label>
+        <label
+          >Deg/step (°):
+          <input name="degStep" type="number" step="0.1" disabled
+        /></label>
+        <label
+          >Drive Ø (mm):
+          <input name="driveDiameter" type="number" step="0.1" disabled
+        /></label>
+        <label
+          >Servo PWM Min (µs):
+          <input name="servoPwmMin" type="number" step="10" disabled
+        /></label>
+        <label
+          >Servo PWM Max (µs):
+          <input name="servoPwmMax" type="number" step="10" disabled
+        /></label>
+      </fieldset>
+    </section>
+
+    <section>
+      <fieldset>
+        <legend>Run/Toggles</legend>
+        <label><input id="runYoke" type="checkbox" disabled /> Run Yoke</label>
+        <label
+          ><input id="runConveyor" type="checkbox" disabled /> Run
+          Conveyor</label
+        >
+      </fieldset>
+    </section>
+
+    <hr style="margin: 1em 0" />
+
+    <div>
+      <button id="clearLog" disabled>Clear Log</button>
+      <button id="queryMcu" disabled>Query MCU</button>
+      <button id="sendAll" disabled>Send All</button>
+      <!-- <button id="saveDefaults" disabled>Save Defaults</button> -->
+      <!-- <button id="saveParams" disabled>Save Params</button> -->
+    </div>
+
+    <textarea id="log" readonly style="height: 50em"></textarea>
+
+    <script type="module">
+      import { ParameterModel } from "./js/ParameterModel.js";
+
+      (async () => {
+        // ───── 1) load your JSON-defaults.json file ─────────────────────────
+        const model = await ParameterModel.loadFromJSON();
+
+        // seed every <input name="…"> from the freshly-loaded model
+        Object.keys(model).forEach((k) => {
+          const ip = document.querySelector(`input[name="${k}"]`);
+          if (!ip) return;
+          if (ip.type === "checkbox") ip.checked = !!model[k];
+          else ip.value = model[k];
+        });
+        refreshDerived();
+
+        // ───── 2) now do all your old WS + UI wiring ────────────────────────
+        const ws = new WebSocket(`ws://${location.hostname}/ws`);
+        const logBox = document.getElementById("log");
+        const writableKeys = Object.keys(model.toSerialDict());
+
+        function log(line) {
+          logBox.value += line + "\n";
+          logBox.scrollTop = logBox.scrollHeight;
+        }
+
+        function wsSend(obj) {
+          const json = JSON.stringify(obj);
+          switch (obj.cmd) {
+            case "get":
+              log("→ GET ALL");
+              break;
+            case "set":
+              log(`→ ${obj.key} = ${obj.value}`);
+              break;
+            case "toggle":
+              log(`→ ${obj.key} = ${obj.value}`);
+              break;
+            case "bulk":
+              log("→ BULK SET");
+              break;
+            // case "saveDefaults":
+            //   log("→ saveDefaults");
+            //   break;
+            case "loadDefaults":
+              log("→ loadDefaults");
+              break;
+            // case "saveParams":
+            //   log("→ saveParams");
+            //   break;
+            default:
+              log(`→ ${json}`);
+              break;
+          }
+          ws.send(json);
+        }
+
+        function setDisabled(state) {
+          document
+            .querySelectorAll("input,button")
+            .forEach((el) => (el.disabled = state));
+        }
+        function setInput(name, val) {
+          const ip = document.querySelector(`input[name="${name}"]`);
+          if (ip) ip.value = val;
+        }
+        function refreshDerived() {
+          document.getElementById("out_loopHeight").textContent =
+            model.loopHeight.toFixed(2);
+          document.getElementById("out_holdHigh").textContent =
+            model.holdHigh.toFixed(2);
+          document.getElementById("out_holdLow").textContent =
+            model.holdLow.toFixed(2);
+          document.getElementById("out_stepsSec").textContent =
+            model.stepsSec.toFixed(2);
+          document.getElementById("out_minTime").textContent =
+            model.minTime.toFixed(2);
+          document.getElementById("out_maxAngle").textContent =
+            model.maxAngle.toFixed(2);
+        }
+
+        ws.addEventListener("open", () => {
+          log(`[✓] Connected to ${ws.url}`);
+          setDisabled(true);
+        });
+
+        ws.addEventListener("message", (ev) => {
+          let msg;
+          try {
+            msg = JSON.parse(ev.data);
+          } catch {
+            log(`← [invalid JSON] ${ev.data}`);
+            return;
+          }
+
+          // READY handshake
+          if (msg.key === "READY") {
+            log("[✓] MCU ready");
+            setDisabled(false);
+            return;
+          }
+
+          // // saveDefaults ACK → reload
+          // if (
+          //   msg.key === "saveDefaults" &&
+          //   msg.cmd === "ack" &&
+          //   msg.value === 1
+          // ) {
+          //   wsSend({ cmd: "loadDefaults" });
+          //   return;
+          // }
+
+          if (typeof msg.key === "string" && msg.value != null) {
+            log(`← ${msg.key} = ${msg.value}`);
+            if (writableKeys.includes(msg.key)) {
+              model.update(msg.key, msg.value);
+              setInput(msg.key, msg.value);
+            } else if (msg.key === "run_yoke") {
+              document.getElementById("runYoke").checked = !!msg.value;
+            } else if (msg.key === "run_conveyor") {
+              document.getElementById("runConveyor").checked = !!msg.value;
+            }
+            refreshDerived();
+          }
+        });
+
+        document
+          .getElementById("queryMcu")
+          .addEventListener("click", () => wsSend({ cmd: "get" }));
+        document
+          .getElementById("sendAll")
+          .addEventListener("click", () =>
+            wsSend({ cmd: "bulk", dict: model.toSerialDict() })
+          );
+        // document
+        //   .getElementById("saveDefaults")
+        //   .addEventListener("click", () => wsSend({ cmd: "saveDefaults" }));
+        // document.getElementById("saveParams").addEventListener("click", () => {
+        //   wsSend({ cmd: "saveParams", dict: model.toSerialDict() });
+        // });
+        document
+          .getElementById("clearLog")
+          .addEventListener("click", () => (logBox.value = ""));
+
+        document.querySelectorAll("input[type=number]").forEach((el) => {
+          el.addEventListener("change", () => {
+            const before = model.toSerialDict();
+            model.update(el.name, Number(el.value));
+            el.value = model[el.name];
+            refreshDerived();
+            const after = model.toSerialDict();
+            for (let [k, v] of Object.entries(after)) {
+              if (Math.abs(v - before[k]) > 1e-6) {
+                wsSend({ cmd: "set", key: k, value: v });
+              }
+            }
+          });
+        });
+
+        document.getElementById("runYoke").addEventListener("change", (e) =>
+          wsSend({
+            cmd: "toggle",
+            key: "run_yoke",
+            value: e.target.checked ? 1 : 0,
+          })
+        );
+        document.getElementById("runConveyor").addEventListener("change", (e) =>
+          wsSend({
+            cmd: "toggle",
+            key: "run_conveyor",
+            value: e.target.checked ? 1 : 0,
+          })
+        );
+      })(); // end async IIFE
+    </script>
+  </body>
+</html>

@@ -1,0 +1,11 @@
+{
+  "riseTime": 168.2092703532876,
+  "fallTime": 168.2092703532876,
+  "holdHigh": 63.58145929342482,
+  "holdLow": 1595.0,
+  "minAngle": 23,
+  "maxAngle": 107.1046351766438,
+  "Steps_Per_Second": 318.30988618379064,
+  "servoPwmMin": 650,
+  "servoPwmMax": 2610
+}

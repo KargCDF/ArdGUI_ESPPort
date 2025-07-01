@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Stepper-Servo Controller</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+
+    <style>
+      body {
+        font-family: sans-serif;
+        background: #eee;
+        color: #111;
+        padding: 1em;
+      }
+      h2 {
+        margin-top: 0;
+      }
+      form {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 2em;
+      }
+      fieldset {
+        border: 1px solid #ccc;
+        padding: 1em;
+        background: #fff;
+        flex: 1 1 250px;
+      }
+      legend {
+        font-weight: bold;
+      }
+      label {
+        display: block;
+        margin: 0.5em 0;
+      }
+      input[type="number"] {
+        width: 6em;
+      }
+      output {
+        display: inline-block;
+        width: 6em;
+        background: #fff;
+        padding: 0.1em 0.4em;
+        border-radius: 3px;
+        border: 1px solid #ccc;
+        text-align: right;
+      }
+      .controls {
+        margin-top: 1em;
+      }
+      .controls button {
+        margin-right: 0.5em;
+      }
+      #log {
+        width: 100%;
+        height: 30em;
+        margin-top: 1em;
+        font-family: monospace;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>Stepper-Servo Controller</h2>
+
+    <form id="controller">
+      <fieldset>
+        <legend>Derived</legend>
+        <p>Loop Height [mm]: <output id="loopHeight">—</output></p>
+        <p>Hold High [ms]: <output id="holdHigh">—</output></p>
+        <p>Hold Low [ms]: <output id="holdLow">—</output></p>
+        <p>Steps/sec: <output id="stepsSec">—</output></p>
+        <p>Min Time [ms]: <output id="minTime">—</output></p>
+        <p>Max Angle [°]: <output id="maxAngle">—</output></p>
+      </fieldset>
+
+      <fieldset>
+        <legend>Parameters</legend>
+        <label
+          >Feed Rate (mm/min): <input name="feedRate" type="number" step="1"
+        /></label>
+        <label
+          >Loop Height (mm):
+          <input name="loopHeightInput" type="number" step="0.1"
+        /></label>
+        <label
+          >Loop Length (mm): <input name="loopLength" type="number" step="0.1"
+        /></label>
+        <label
+          >Retract Length (mm):
+          <input name="retractLength" type="number" step="0.1"
+        /></label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Configuration</legend>
+        <label
+          >Min Angle (°): <input name="minAngle" type="number" step="1"
+        /></label>
+        <label
+          >deg/° (s/°): <input name="degSec" type="number" step="0.0001"
+        /></label>
+        <label
+          >Rise Time (ms): <input name="riseTime" type="number" step="1"
+        /></label>
+        <label
+          >Fall Time (ms): <input name="fallTime" type="number" step="1"
+        /></label>
+        <label
+          >Yoke Length (mm): <input name="yokeLength" type="number" step="0.1"
+        /></label>
+        <label
+          >µ-steps: <input name="muSteps" type="number" step="0.5"
+        /></label>
+        <label
+          >Deg/step (°): <input name="degStep" type="number" step="0.1"
+        /></label>
+        <label
+          >Drive Ø (mm): <input name="driveDiameter" type="number" step="0.1"
+        /></label>
+        <label
+          >Servo PWM Min (µs):
+          <input name="servoPwmMin" type="number" step="10"
+        /></label>
+        <label
+          >Servo PWM Max (µs):
+          <input name="servoPwmMax" type="number" step="10"
+        /></label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Toggles &amp; Control</legend>
+        <label>
+          <input name="run_yoke" type="checkbox" />
+          Run Yoke
+        </label>
+        <label>
+          <input name="run_conveyor" type="checkbox" />
+          Run Conveyor
+        </label>
+        <div style="margin-top: 0.5em">
+          <button type="button" id="startStop">Start / Stop</button>
+        </div>
+      </fieldset>
+    </form>
+
+    <div class="controls">
+      <button id="clearLog">Clear Log</button>
+      <button id="queryMcu">Query MCU</button>
+      <button id="sendAll">Send All</button>
+      <button id="saveDefaults">Save Defaults</button>
+    </div>
+
+    <textarea id="log" readonly></textarea>
+
+    <script type="module">
+      import { ParameterModel } from "./js/ParameterModel.js";
+      const model = new ParameterModel();
+      const ws = new WebSocket(`ws://${location.hostname}/ws`);
+      const logBox = document.getElementById("log");
+
+      // Map of all keys → PIDs
+      const PARAM_MAP = {
+        riseTime: 1,
+        fallTime: 2,
+        holdHigh: 3,
+        holdLow: 4,
+        minAngle: 5,
+        maxAngle: 6,
+        Steps_Per_Second: 7,
+        servoPwmMin: 8,
+        servoPwmMax: 9,
+        run_yoke: 0x10,
+        run_conveyor: 0x11,
+        startStop: 0x12, // if your firmware supports it
+      };
+
+      // Cache references to all <output> elements
+      const OUT = {
+        loopHeight: document.getElementById("loopHeight"),
+        holdHigh: document.getElementById("holdHigh"),
+        holdLow: document.getElementById("holdLow"),
+        stepsSec: document.getElementById("stepsSec"),
+        minTime: document.getElementById("minTime"),
+        maxAngle: document.getElementById("maxAngle"),
+      };
+
+      function log(line) {
+        logBox.value += line + "\n";
+        logBox.scrollTop = logBox.scrollHeight;
+      }
+
+      function wsSend(obj) {
+        const json = JSON.stringify(obj);
+        if (ws.readyState === WebSocket.OPEN) ws.send(json);
+        log("→ " + json);
+      }
+
+      function sendSet(key, value) {
+        const pid = PARAM_MAP[key];
+        if (pid !== undefined) wsSend({ cmd: "set", key, value });
+      }
+
+      // Update all derived outputs
+      function refreshDerived() {
+        OUT.loopHeight.textContent = model.loopHeight.toFixed(2);
+        OUT.holdHigh.textContent = model.holdHigh.toFixed(2);
+        OUT.holdLow.textContent = model.holdLow.toFixed(2);
+        OUT.stepsSec.textContent = model.stepsSec.toFixed(2);
+        OUT.minTime.textContent = model.minTime.toFixed(2);
+        OUT.maxAngle.textContent = model.maxAngle.toFixed(2);
+
+        // and push those into the corresponding inputs
+        ["riseTime", "fallTime", "holdHigh", "holdLow"].forEach((k) => {
+          const el = document.querySelector(`input[name=${k}]`);
+          if (el && Number(el.value) !== model[k]) el.value = model[k];
+        });
+      }
+
+      // Called whenever any <input> changes
+      function handleInputChange(name, value) {
+        model.update(name, value);
+
+        // some keys drive multiple PIDs; we just push them all
+        sendSet(name, value);
+        refreshDerived();
+      }
+
+      // WebSocket events
+      ws.addEventListener("open", () => log("[socket] open"));
+      ws.addEventListener("message", (ev) => {
+        const obj = JSON.parse(ev.data);
+        if (obj.cmd === "READY") return;
+
+        const { key, value } = obj;
+        if (key in model) {
+          model.update(key, value);
+          const inp = document.querySelector(`input[name=${key}]`);
+          if (inp)
+            inp.type === "checkbox"
+              ? (inp.checked = Boolean(value))
+              : (inp.value = value);
+          refreshDerived();
+        }
+        log("← " + ev.data);
+      });
+
+      // Wire up all inputs
+      document.querySelectorAll("#controller input").forEach((input) => {
+        const name = input.name;
+        // initialize from model
+        if (input.type === "checkbox") {
+          input.checked = Boolean(model[name]);
+        } else {
+          input.value = model[name] ?? "";
+        }
+        input.addEventListener("input", (e) => {
+          const val =
+            input.type === "checkbox"
+              ? input.checked
+                ? 1
+                : 0
+              : Number(input.value);
+          handleInputChange(name, val);
+        });
+      });
+
+      // Control buttons
+      document.getElementById("clearLog").onclick = () => (logBox.value = "");
+      document.getElementById("queryMcu").onclick = () =>
+        wsSend({ cmd: "get" });
+      document.getElementById("sendAll").onclick = () => {
+        Object.entries(model.toSerialDict()).forEach(([k, v]) => sendSet(k, v));
+      };
+      document.getElementById("saveDefaults").onclick = () =>
+        wsSend({ cmd: "saveDefaults" });
+      document.getElementById("startStop").onclick = () =>
+        wsSend({ cmd: "toggle", key: "startStop", value: 0 });
+
+      // One final kick-off
+      refreshDerived();
+    </script>
+  </body>
+</html>
