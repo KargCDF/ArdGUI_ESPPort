@@ -46,11 +46,11 @@
         /></label>
         <label
           >Rise Time (ms):
-          <input name="riseTimeRaw" type="number" step="1" disabled
+          <input name="riseTimeRaw" type="number" step="0.5000" disabled
         /></label>
         <label
           >Fall Time (ms):
-          <input name="fallTimeRaw" type="number" step="1" disabled
+          <input name="fallTimeRaw" type="number" step="0.5000" disabled
         /></label>
         <label
           >Yoke Length (mm):
@@ -104,19 +104,18 @@
     <section>
       <fieldset>
         <legend>Run/Toggles</legend>
+        <label><input id="runAll" type="checkbox" disabled /> Run All</label>
         <label><input id="runYoke" type="checkbox" disabled /> Run Yoke</label>
-        <label
-          ><input id="runConveyor" type="checkbox" disabled /> Run
-          Conveyor</label
-        >
+        <label><input id="runConveyor" type="checkbox" disabled /> Run Conveyor</label>
       </fieldset>
     </section>
     <section>
       <fieldset>
         <legend>Presets</legend>
         <select id="preset-dd"></select>
-        <button id="saveConfig" disabled>Save&nbsp;→&nbsp;MCU</button>
         <button id="savePreset" disabled>Save Preset</button>
+        <!-- <button id="saveConfig" disabled>Save&nbsp;→&nbsp;MCU</button> -->
+        <button id="loadConfig" disabled>Reload&nbsp;⟳</button>
       </fieldset>
     </section>
     
@@ -161,30 +160,42 @@ window.addEventListener("DOMContentLoaded", async () => {
   bindModelToForm(model);
 
   model.addEventListener("preset",  () => bindModelToForm(model));
-  model.addEventListener("change",  () => updateDerived(model));
-
-  document.querySelectorAll("input[type=number]").forEach(ip => {
-    ip.addEventListener("change", () => {
-      model.update(ip.name, Number(ip.value));
-      ip.value = model[ip.name];
-      pendingDict[NameToID[ip.name]] = model[ip.name];
-    });
+  model.addEventListener("change", (e) => {
+    updateDerived(model);
+    
+    // If geometry changed and affected rise/fall times, update those input fields too
+    if (['minAngleRaw', 'maxAngleRaw', 'degSec', 'yokeLength', 'loopHeightInput'].includes(e.detail.field)) {
+      document.querySelector('input[name="riseTimeRaw"]').value = model.riseTimeRaw;
+      document.querySelector('input[name="fallTimeRaw"]').value = model.fallTimeRaw;
+    }
   });
 
-  runYoke.addEventListener("change", e =>
-    queueToggle(NameToID.runYoke, e.target.checked));
-  runConveyor.addEventListener("change", e =>
-    queueToggle(NameToID.runConveyor, e.target.checked));
-
-  dd.addEventListener("change", () => model.applyPreset(dd.value, presets));
-
   /* ────────────────────────────────────────────────────────────
-     3.  WebSocket setup with verbose logging
+     3.  WebSocket setup with verbose logging + debouncing
      ──────────────────────────────────────────────────────────── */
   const ws = new WebSocket(`ws://${location.host}/ws`);
   ws.binaryType = "arraybuffer";
   const logBox = document.getElementById("log");
   const pendingDict = {};
+  
+  // Debouncing mechanism
+  let sendTimeout = null;
+  const DEBOUNCE_DELAY = 300;
+
+  // Add human-readable parameter names
+  const ParamNames = {
+    0x01: "Rise Time",
+    0x02: "Fall Time", 
+    0x03: "Hold High",
+    0x04: "Hold Low",
+    0x05: "Min Angle",
+    0x06: "Max Angle",
+    0x07: "Steps/Sec",
+    0x08: "Servo PWM Min",
+    0x09: "Servo PWM Max",
+    0x10: "Run Yoke",
+    0x11: "Run Conveyor"
+  };
 
   function log(line) {
     logBox.value += line + "\n";
@@ -193,28 +204,17 @@ window.addEventListener("DOMContentLoaded", async () => {
   
   function sendFrame(cmd, id, val = 0) {
     ws.send(buildFrame(cmd, id, val));
-    log(`→ 0x${id.toString(16).padStart(2,"0")} ${val}`);
-  }
-  
-  function setDisabled(state) {
-    document.querySelectorAll("input,button")
-            .forEach(el => el.disabled = state);
+    const paramName = ParamNames[id] || `0x${id.toString(16).padStart(2,"0")}`;
+    log(`→ ${paramName}: ${val}`);
   }
 
-  ws.addEventListener("open", () => {
-    log(`✓ Connected to ${ws.url}`);
-    setDisabled(false);
-  });
-
-  ws.addEventListener("message", ev => {
-    if (!(ev.data instanceof ArrayBuffer)) return;
-    const info = parseFrame(new Uint8Array(ev.data));
-    if (!info || info.cmd !== CMD.ACK) return;
-
-    const field = IDToName[info.id];
-    if (field) model.update(field, info.value);
-    log(`← ACK 0x${info.id.toString(16).padStart(2,"0")} ${info.value}`);
-  });
+  function scheduleSend() {
+    if (sendTimeout) clearTimeout(sendTimeout);
+    sendTimeout = setTimeout(() => {
+      flushPending();
+      sendTimeout = null;
+    }, DEBOUNCE_DELAY);
+  }
 
   function flushPending() {
     for (const [idStr, v] of Object.entries(pendingDict)) {
@@ -228,43 +228,140 @@ window.addEventListener("DOMContentLoaded", async () => {
     sendFrame(CMD.TOGGLE, id, val ? 1 : 0);
   }
 
+  function syncRunAllCheckbox() {
+    runAll.checked = runYoke.checked && runConveyor.checked;
+  }
+
+  function setBothRuns(state) {
+    // Update checkboxes visually
+    runYoke.checked = runConveyor.checked = state;
+    syncRunAllCheckbox();
+
+    // Tell the MCU (two binary frames)
+    queueToggle(NameToID.runYoke,      state);
+    queueToggle(NameToID.runConveyor,  state);
+  }
+
+  function setDisabled(state) {
+    document.querySelectorAll("input,button").forEach(el => el.disabled = state);
+  }
+
   /* ────────────────────────────────────────────────────────────
-     4.  Button event handlers
+     4.  Input handlers with debouncing
      ──────────────────────────────────────────────────────────── */
-  document.getElementById("sendAll")
-          .addEventListener("click", () => {
-            for (const [id, v] of Object.entries(model.toSerialDict()))
-              sendFrame(CMD.SET, Number(id), v);
-          });
+  document.querySelectorAll("input[type=number]").forEach(ip => {
+    // Use 'input' for immediate visual feedback, but validate on 'change'
+    ip.addEventListener("input", () => {
+      // Only update derived display, don't update model yet
+      updateDerived(model);
+    });
+    
+    // Use 'change' for actual model updates and MCU communication
+    ip.addEventListener("change", () => {
+      const newValue = Number(ip.value);
+      if (isNaN(newValue)) return; // Skip invalid numbers
+      
+      model.update(ip.name, newValue);
+      ip.value = model[ip.name]; // Show clamped value if needed
+      
+      // Send MCU parameters
+      if (NameToID[ip.name]) {
+        pendingDict[NameToID[ip.name]] = model[ip.name];
+        scheduleSend();
+      }
+      // For UI-only parameters, update derived MCU values
+      else if (['feedRate', 'loopHeightInput', 'loopLength', 'retractLength', 'degSec', 'yokeLength', 'muSteps', 'degStep', 'driveDiameter'].includes(ip.name)) {
+        updateDerivedMCUParams();
+      }
+    });
+  });
 
-  document.getElementById("queryMcu")
-          .addEventListener("click", () =>
-            sendFrame(CMD.GET, 0x00, 0));
+  // Function to update MCU parameters based on derived calculations
+  function updateDerivedMCUParams() {
+    // Update the MCU parameters that are calculated from UI inputs
+    const derivedUpdates = {
+      [NameToID.holdHighRaw]: model.holdHighCalc,
+      [NameToID.holdLowRaw]: model.holdLowCalc,
+      [NameToID.stepsPerSecondRaw]: model.stepsSecCalc,
+      [NameToID.maxAngleRaw]: model.maxAngle  // ADD THIS LINE
+    };
+    
+    // Queue all derived updates
+    Object.assign(pendingDict, derivedUpdates);
+    scheduleSend();
+    
+    // Also update the model's MCU fields to keep everything in sync
+    model.holdHighRaw = model.holdHighCalc;
+    model.holdLowRaw = model.holdLowCalc;
+    model.stepsPerSecondRaw = model.stepsSecCalc;
+    model.maxAngleRaw = model.maxAngle;  // ADD THIS LINE TOO
+  }
 
-  document.getElementById("clearLog")
-          .addEventListener("click", () => (logBox.value = ""));
+  runYoke     .addEventListener("change", e => {
+    queueToggle(NameToID.runYoke, e.target.checked);
+    syncRunAllCheckbox();
+  });
+  runConveyor .addEventListener("change", e => {
+    queueToggle(NameToID.runConveyor, e.target.checked);
+    syncRunAllCheckbox();
+  });
 
-  document.getElementById("saveConfig")
-          .addEventListener("click", () => {
-            flushPending();
-            sendFrame(CMD.SAVE, 0x00, 0);
-            log("→ SAVE to NVS");
-          });
+  /* NEW master checkbox */
+  runAll .addEventListener("change", e => setBothRuns(e.target.checked));
 
-  // Save Preset functionality
+  dd.addEventListener("change", () => model.applyPreset(dd.value, presets));
+
+  /* ────────────────────────────────────────────────────────────
+     5.  WebSocket event handlers
+     ──────────────────────────────────────────────────────────── */
+  ws.addEventListener("open", () => {
+    log(`✓ Connected to ${ws.url}`);
+    setDisabled(false);
+  });
+
+  ws.addEventListener("message", ev => {
+    if (!(ev.data instanceof ArrayBuffer)) return;
+    const info = parseFrame(new Uint8Array(ev.data));
+    if (!info || info.cmd !== CMD.ACK) return;
+
+    const field = IDToName[info.id];
+    if (field) model.update(field, info.value);
+    if (field === "runYoke" || field === "runConveyor") syncRunAllCheckbox();
+    const paramName = ParamNames[info.id] || `0x${info.id.toString(16).padStart(2,"0")}`;
+    log(`← ACK ${paramName}: ${info.value}`);
+  });
+
+  /* ────────────────────────────────────────────────────────────
+     6.  Button event handlers
+     ──────────────────────────────────────────────────────────── */
+  document.getElementById("sendAll").addEventListener("click", () => {
+    const serialDict = model.toSerialDict();
+    for (const [id, v] of Object.entries(serialDict)) {
+      sendFrame(CMD.SET, Number(id), v);
+    }
+  });
+
+  document.getElementById("queryMcu").addEventListener("click", () =>
+    sendFrame(CMD.GET, 0x00, 0));
+
+  document.getElementById("clearLog").addEventListener("click", () => 
+    (logBox.value = ""));
+
+  document.getElementById("loadConfig").addEventListener("click", () => {
+    sendFrame(CMD.LOAD_NVS, 0, 0);
+    log("→ LOAD_NVS");
+  });
+
   document.getElementById("savePreset").addEventListener("click", () => {
     const name = prompt("Preset name:");
     if (!name) return;
 
-    // 1. merge into the cached presets object
     presets[name] = model.toJSON();
 
-    // 2. add to dropdown
     const opt = document.createElement("option");
     opt.value = opt.textContent = name;
     dd.appendChild(opt);
 
-    // 3. persist in browser for now (localStorage)
     const userPresets = {};
     Object.keys(presets).forEach(key => {
       if (key !== "Default") userPresets[key] = presets[key];
@@ -272,10 +369,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     localStorage.setItem("userPresets", JSON.stringify(userPresets));
 
     log(`✓ Saved preset: ${name}`);
-    // TODO Phase-4: send CMD.SAVE_PRESET to MCU so it can store in NVS
   });
-
-  updateDerived(model);
 
   function bindModelToForm(m) {
     Object.entries(m.toJSON()).forEach(([k, v]) => {
@@ -286,127 +380,21 @@ window.addEventListener("DOMContentLoaded", async () => {
     });
     runYoke.checked = !!m.runYoke;
     runConveyor.checked = !!m.runConveyor;
+    runAll.checked = model.runYoke && model.runConveyor;
     updateDerived(m);
   }
   
   function updateDerived(m) {
     out_loopHeight.textContent = m.loopHeight.toFixed(2);
-    out_holdHigh.textContent = m.holdHighCalc.toFixed(2);
-    out_holdLow.textContent = m.holdLowCalc.toFixed(2);
+    out_holdHigh.textContent = m.holdHighCalc.toFixed(3);
+    out_holdLow.textContent = m.holdLowCalc.toFixed(3);
     out_stepsSec.textContent = m.stepsSecCalc.toFixed(2);
-    out_minTime.textContent = m.minTime.toFixed(2);
+    out_minTime.textContent = m.minTime.toFixed(4);
     out_maxAngle.textContent = m.maxAngle.toFixed(2);
   }
 
+  updateDerived(model);
 });
 </script>
-
-  <!-- <script type="module">
-  import { ParameterModel } from "./js/ParameterModel.js";
-
-  window.addEventListener("DOMContentLoaded", async () => {
-
-    /* 1  Load presets & populate dropdown */
-    const presets = await ParameterModel.loadPresets();
-    const dd = document.getElementById("preset-dd");
-    Object.keys(presets).forEach(name => {
-      const opt = document.createElement("option");
-      opt.value = opt.textContent = name;
-      dd.appendChild(opt);
-    });
-
-    /* 2  Create model from current preset */
-    let model = await ParameterModel.fromPreset(dd.value);
-    bindModelToForm(model);          // fill inputs + derived outputs
-
-    /* 3  Re-apply preset when user picks another */
-    dd.addEventListener("change", async () => {
-      await model.applyPreset(dd.value, presets);
-      bindModelToForm(model);
-    });
-
-    /* 4  Open WebSocket */
-    const ws = new WebSocket(`ws://${location.host}/ws`);
-    const logBox = document.getElementById("log");
-    const writableIDs = Object.values(ParameterModel.NameToID);
-
-    /* --- helpers --- */
-    function log(line) {
-      logBox.value += line + "\n";
-      logBox.scrollTop = logBox.scrollHeight;
-    }
-    function setDisabled(state) {
-      document.querySelectorAll("input,button").forEach(el => el.disabled = state);
-    }
-
-    /* 5  WebSocket event handlers */
-    ws.addEventListener("open", () => {
-      log(`✓ Connected to ${ws.url}`);
-      setDisabled(false);
-    });
-
-    ws.addEventListener("message", ev => {
-      /* handle ACK frames here if you already parse them as JSON,
-         else remove this block and keep your existing binary handler */
-    });
-
-    /* 6  Button wiring */
-    document.getElementById("queryMcu")
-            .addEventListener("click", () => ws.send(JSON.stringify({cmd:"get"})));
-    document.getElementById("sendAll")
-            .addEventListener("click", () =>
-              ws.send(JSON.stringify({cmd:"bulk", dict:model.toSerialDict()})));
-    document.getElementById("clearLog")
-            .addEventListener("click", () => (logBox.value = ""));
-    document.getElementById("saveConfig")
-            .addEventListener("click", () =>
-              ws.send(JSON.stringify({cmd:"save"})));   // Phase-3 NVS cmd
-
-    /* 7  Form → model binding */
-    document.querySelectorAll("input[type=number]").forEach(ip => {
-      ip.addEventListener("change", () => {
-        const before = model.toSerialDict();
-        model.update(ip.name, Number(ip.value));
-        ip.value = model[ip.name];
-        updateDerived(model);
-
-        const after = model.toSerialDict();
-        for (const id of writableIDs) {
-          if (Math.abs(after[id] - before[id]) > 1e-6) {
-            ws.send(JSON.stringify({cmd:"set", id, value:after[id]}));
-          }
-        }
-      });
-    });
-
-    /* 8  Checkboxes */
-    document.getElementById("runYoke")
-            .addEventListener("change", e =>
-              ws.send(JSON.stringify({cmd:"toggle", id:0x10, value:e.target.checked?1:0})));
-    document.getElementById("runConveyor")
-            .addEventListener("change", e =>
-              ws.send(JSON.stringify({cmd:"toggle", id:0x11, value:e.target.checked?1:0})));
-
-    /* helper to fill inputs & computed outputs */
-    function bindModelToForm(m) {
-      Object.keys(m.toJSON()).forEach(k => {
-        const ip = document.querySelector(`input[name="${k}"]`);
-        if (!ip) return;
-        if (ip.type === "checkbox") ip.checked = !!m[k];
-        else ip.value = m[k];
-      });
-      updateDerived(m);
-    }
-    function updateDerived(m) {
-      document.getElementById("out_loopHeight").textContent = m.computedLoopHeight.toFixed(2);
-      document.getElementById("out_holdHigh").textContent   = m.holdHigh.toFixed(2);
-      document.getElementById("out_holdLow").textContent    = m.holdLow.toFixed(2);
-      document.getElementById("out_stepsSec").textContent   = m.stepsPerSecond.toFixed(2);
-      document.getElementById("out_minTime").textContent    = m.minTime.toFixed(2);
-      document.getElementById("out_maxAngle").textContent   = m.maxAngle.toFixed(2);
-    }
-
-  }); // DOMContentLoaded
-  </script> -->
 </body>
 </html>

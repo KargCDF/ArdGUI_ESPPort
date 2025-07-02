@@ -5,7 +5,8 @@ export const CMD  = {
   TOGGLE: 0x02,
   GET:    0x03,
   ACK:    0x81,
-  SAVE:   0x20          // we'll use this in Phase-3
+  SAVE_NVS:   0x20,
+  LOAD_NVS:   0x21
 };
 
 export function buildFrame(cmd, id, value = 0) {

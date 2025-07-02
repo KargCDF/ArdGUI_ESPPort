@@ -107,7 +107,22 @@ export class ParameterModel extends EventTarget {
         this.dispatchEvent(new Event("change"));
     }
     /* ─── generic update ─── */
-    update(f, v) { this[f] = v; this.dispatchEvent(new CustomEvent("change", { detail: { field: f, value: v } })); }
+    update(f, v) {
+        let clampedValue = v;
+        // Clamp rise/fall times to minimum time
+        if (f === 'riseTimeRaw' || f === 'fallTimeRaw') {
+            clampedValue = Math.max(this.minTime, v);
+        }
+        // Also revalidate rise/fall times when angle parameters change
+        this[f] = clampedValue;
+        if (f === 'minAngleRaw' || f === 'maxAngleRaw' || f === 'degSec' ||
+            f === 'yokeLength' || f === 'loopHeightInput') {
+            // Recalculate and clamp existing rise/fall times when geometry changes
+            this.riseTimeRaw = Math.max(this.minTime, this.riseTimeRaw);
+            this.fallTimeRaw = Math.max(this.minTime, this.fallTimeRaw);
+        }
+        this.dispatchEvent(new CustomEvent("change", { detail: { field: f, value: clampedValue } }));
+    }
     /* ─── math helpers (ported 1:1) ─── */
     _deg(r) { return r * 180 / Math.PI; }
     _rad(d) { return d * Math.PI / 180; }
