@@ -1,0 +1,11 @@
+{
+  "name": "ardgui-espport",
+  "version": "0.1.0",
+  "type": "module",
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  },
+  "scripts": {
+    "build-web": "tsc -p tsconfig.json"
+  }
+}

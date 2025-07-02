@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "target": "ES2021",          /* code it emits */
+    "module": "ES2020",          /*   <script type=module> */
+    "lib": ["ES2021", "DOM"],    /* include modern JS + browser globals */
+    "strict": true,
+    "outDir": "./data/js",       /* compiled JS goes here → SPIFFS */
+    "rootDir": "./websrc",
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["websrc/**/*.ts"]
+}

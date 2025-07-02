@@ -1,0 +1,28 @@
+{
+  "TestRig": {
+    "riseTime": 120.0,
+    "fallTime": 120.0,
+    "holdHigh": 160.0,
+    "holdLow": 700.0,
+    "minAngle": 20,
+    "maxAngle": 80,
+    "stepsPerSecond": 40,
+    "servoPwmMin": 650,
+    "servoPwmMax": 2600,
+    "runYoke": 0,
+    "runConveyor": 0
+  },
+  "CEAD": {
+    "riseTime": 100.0,
+    "fallTime": 100.0,
+    "holdHigh": 140.0,
+    "holdLow": 600.0,
+    "minAngle": 25,
+    "maxAngle": 85,
+    "stepsPerSecond": 45,
+    "servoPwmMin": 600,
+    "servoPwmMax": 2500,
+    "runYoke": 0,
+    "runConveyor": 0
+  }
+}
