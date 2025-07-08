@@ -114,6 +114,7 @@
         <legend>Presets</legend>
         <select id="preset-dd"></select>
         <button id="savePreset" disabled>Save Preset</button>
+        <button id="deletePreset">Delete Preset</button>
         <!-- <button id="saveConfig" disabled>Save&nbsp;→&nbsp;MCU</button> -->
         <button id="loadConfig" disabled>Reload&nbsp;⟳</button>
       </fieldset>
@@ -414,6 +415,13 @@ window.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
+  document.getElementById("deletePreset").addEventListener("click", () => {
+    const opt = dd.options[dd.selectedIndex];
+    const id = opt.dataset.presetId;
+    if (!id) return;
+    sendFrame(CMD.DELETE_PRESET, 0, Number(id));
+  });
+
   // Enhanced createFullPreset - gets ALL user-editable fields
   function createFullPreset() {
     const preset = {};
@@ -601,6 +609,16 @@ window.addEventListener("DOMContentLoaded", async () => {
       } catch (error) {
         log(`✗ Failed to load preset from ESP32: ${error.message}`);
       }
+    }
+  });
+
+  // Remove preset from UI/map when delete ACK received
+  window.addEventListener('esp32-ack', ev => {
+    const { id, value } = ev.detail;
+    if (id === 0xF4) {
+      esp32Presets.delete(value);
+      const opt = dd.querySelector(`option[data-preset-id="${value}"]`);
+      if (opt) opt.remove();
     }
   });
 
