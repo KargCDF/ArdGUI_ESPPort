@@ -471,7 +471,7 @@ window.addEventListener("DOMContentLoaded", async () => {
         
         if (id === 0xF9 && value === presetId) {
           // ESP32 ready to receive field data
-          sendAllFieldsToESP32(presetData);
+          sendAllFieldsToESP32(presetData, presetName);
           return;
         }
         
@@ -493,7 +493,7 @@ window.addEventListener("DOMContentLoaded", async () => {
         }
       };
 
-      const sendAllFieldsToESP32 = (data) => {
+      const sendAllFieldsToESP32 = (data, name) => {
         const fieldMap = {
           feedRate: 0x20,
           loopHeightInput: 0x21,
@@ -508,14 +508,25 @@ window.addEventListener("DOMContentLoaded", async () => {
           servoPwmMin: 0x2A,
           servoPwmMax: 0x2B
         };
-        
-        fieldsToSend = Object.keys(fieldMap).length;
-        
+        const nameChunks = 8;
+        fieldsToSend = Object.keys(fieldMap).length + nameChunks;
+
         // Send each field
         Object.entries(fieldMap).forEach(([fieldName, fieldId]) => {
           const value = data[fieldName] || 0;
           sendFrame(CMD_SAVE_PRESET_FIELD, fieldId, value);
         });
+
+        const enc = new TextEncoder();
+        const bytes = new Uint8Array(32);
+        bytes.fill(0);
+        const encBytes = enc.encode(name);
+        bytes.set(encBytes.slice(0, 32));
+        for (let i = 0; i < nameChunks; i++) {
+          const dv = new DataView(bytes.buffer, i * 4, 4);
+          const floatVal = dv.getFloat32(0, true);
+          sendFrame(CMD_SAVE_PRESET_FIELD, 0x30 + i, floatVal);
+        }
       };
 
       window.addEventListener('esp32-ack', handleSaveAck);
@@ -613,6 +624,9 @@ window.addEventListener("DOMContentLoaded", async () => {
         reject(new Error("Timeout waiting for ESP32 preset list"));
       }, 5000);
 
+      let pendingId = null;
+      let nameBytes = [];
+
       const handlePresetListAck = (event) => {
         const { id, value } = event.detail;
         
@@ -621,18 +635,30 @@ window.addEventListener("DOMContentLoaded", async () => {
           return;
         }
         else if (id === 0xF5) { // PRESET_EXISTS
-          const presetId = value;
-          const presetName = `ESP32 Preset ${presetId}`;
-          esp32Presets.set(presetId, presetName);
-          
-          // Add to dropdown if not already there
-          const existingOption = dd.querySelector(`option[data-preset-id="${presetId}"]`);
-          if (!existingOption) {
-            const opt = document.createElement("option");
-            opt.value = opt.textContent = presetName;
-            opt.dataset.presetId = presetId;
-            opt.dataset.source = "esp32";
-            dd.appendChild(opt);
+          pendingId = value;
+          nameBytes = [];
+        }
+        else if (id === 0xF6 && pendingId !== null) {
+          const dv = new DataView(new ArrayBuffer(4));
+          dv.setFloat32(0, value, true);
+          for (let i = 0; i < 4; i++) nameBytes.push(dv.getUint8(i));
+          if (nameBytes.length >= 32) {
+            const dec = new TextDecoder();
+            const name = dec.decode(new Uint8Array(nameBytes)).replace(/\0.*$/, '') || `ESP32 Preset ${pendingId}`;
+            esp32Presets.set(pendingId, name);
+            const existingOption = dd.querySelector(`option[data-preset-id="${pendingId}"]`);
+            if (!existingOption) {
+              const opt = document.createElement("option");
+              opt.value = opt.textContent = name;
+              opt.dataset.presetId = pendingId;
+              opt.dataset.source = "esp32";
+              dd.appendChild(opt);
+            } else {
+              existingOption.textContent = name;
+              existingOption.value = name;
+            }
+            pendingId = null;
+            nameBytes = [];
           }
         }
         else if (id === 0xF8) { // LIST_END
