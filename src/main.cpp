@@ -790,7 +790,6 @@ void loop()
   WebBridge_loop();
 }
 
-// Add this function after the existing savePresetToNVS function (around line 650):
 
 void savePresetToNVSWithData(uint8_t presetId, const Preset& presetData) {
   if (presetId == 0 || presetId > 100) return;
