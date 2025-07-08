@@ -430,6 +430,30 @@ window.addEventListener("DOMContentLoaded", async () => {
     return preset;
   }
 
+  // Apply a full preset object to the model and UI, then send it
+  function applyFullPreset(data) {
+    for (const [field, value] of Object.entries(data)) {
+      if (field in model) {
+        model.update(field, Number(value));
+      }
+      const ip = document.querySelector(`input[name="${field}"]`);
+      if (ip) {
+        if (ip.type === "checkbox") ip.checked = !!value;
+        else ip.value = value;
+      }
+    }
+
+    runYoke.checked = !!model.runYoke;
+    runConveyor.checked = !!model.runConveyor;
+    updateRunAllState();
+    updateDerived(model);
+
+    const serialDict = model.toSerialDict();
+    for (const [id, v] of Object.entries(serialDict)) {
+      sendFrame(CMD.SET, Number(id), v);
+    }
+  }
+
   // Enhanced save function that sends all browser fields to ESP32
   async function saveFullPresetToESP32(presetId, presetName, presetData) {
     return new Promise(async (resolve, reject) => {
