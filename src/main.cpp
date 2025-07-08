@@ -119,6 +119,8 @@ struct Preset {
   // Checkboxes
   uint8_t runYoke;
   uint8_t runConveyor;
+
+  char name[32];
 };
 #pragma pack()
 
@@ -316,11 +318,18 @@ void processIncomingFrame(uint8_t *buf, size_t len)
     Serial.printf("[DEBUG] Sending preset count: %d\n", count);
     sendFrame(CMD_ACK, 0xF3, count);
     
-    // Send each existing preset ID
+    // Send each existing preset ID and name
     for (uint8_t i = 1; i <= 100; i++) {
       if (prefs.isKey(String(i).c_str())) {
-        Serial.printf("[DEBUG] Found preset ID: %d\n", i);
+        Preset preset = {};
+        prefs.getBytes(String(i).c_str(), &preset, sizeof(Preset));
+        Serial.printf("[DEBUG] Found preset ID: %d name: %s\n", i, preset.name);
         sendFrame(CMD_ACK, 0xF5, i);  // 0xF5 = PRESET_EXISTS
+        for (uint8_t c = 0; c < 8; c++) {
+          FloatBytes fbName;
+          memcpy(fbName.b, &preset.name[c*4], 4);
+          sendFrame(CMD_ACK, 0xF6, fbName.f);  // send name chunk
+        }
       }
     }
     
@@ -343,6 +352,7 @@ void processIncomingFrame(uint8_t *buf, size_t len)
     // Store the preset ID for the upcoming data
     currentPresetId = presetId;
     currentPresetData = {}; // Reset struct
+    memset(currentPresetData.name, 0, sizeof(currentPresetData.name));
     
     // Copy current MCU values
     currentPresetData.riseTime = riseTime;
@@ -378,6 +388,14 @@ void processIncomingFrame(uint8_t *buf, size_t len)
       case 0x29: currentPresetData.minAngleRaw = value; break;
       case 0x2A: currentPresetData.servoPwmMinUser = value; break;
       case 0x2B: currentPresetData.servoPwmMaxUser = value; break;
+      case 0x30: memcpy(&currentPresetData.name[0], fb.b, 4); break;
+      case 0x31: memcpy(&currentPresetData.name[4], fb.b, 4); break;
+      case 0x32: memcpy(&currentPresetData.name[8], fb.b, 4); break;
+      case 0x33: memcpy(&currentPresetData.name[12], fb.b, 4); break;
+      case 0x34: memcpy(&currentPresetData.name[16], fb.b, 4); break;
+      case 0x35: memcpy(&currentPresetData.name[20], fb.b, 4); break;
+      case 0x36: memcpy(&currentPresetData.name[24], fb.b, 4); break;
+      case 0x37: memcpy(&currentPresetData.name[28], fb.b, 4); break;
     }
     
     sendFrame(CMD_ACK, 0xFA, fieldId); // Field received
@@ -592,6 +610,8 @@ void savePresetToNVS(uint8_t presetId) {
     .servoPwmMin = (float)servoPwmMin,
     .servoPwmMax = (float)servoPwmMax
   };
+
+  snprintf(preset.name, sizeof(preset.name), "Preset %u", presetId);
   
   // Save binary preset data directly using preset ID as key
   prefs.putBytes(String(presetId).c_str(), &preset, sizeof(Preset));
@@ -628,12 +648,12 @@ void loadPresetFromNVS(uint8_t presetId) {
   prefs.begin("presets", true);
   size_t dataSize = prefs.getBytesLength(String(presetId).c_str());
   
-  if (dataSize == sizeof(Preset)) {
-    Preset preset;
-    size_t bytesRead = prefs.getBytes(String(presetId).c_str(), &preset, sizeof(Preset));
+  if (dataSize == sizeof(Preset) || dataSize == 86) {
+    Preset preset = {};
+    size_t bytesRead = prefs.getBytes(String(presetId).c_str(), &preset, min(dataSize, sizeof(Preset)));
     prefs.end();
-    
-    if (bytesRead == sizeof(Preset)) {
+
+    if (bytesRead == dataSize) {
       // Apply MCU values
       riseTime = constrain(preset.riseTime, 1.0f, 10000.0f);
       fallTime = constrain(preset.fallTime, 1.0f, 10000.0f);
@@ -776,11 +796,14 @@ void loop()
 
 void savePresetToNVSWithData(uint8_t presetId, const Preset& presetData) {
   if (presetId == 0 || presetId > 100) return;
-  
+
   prefs.begin("presets", false);
-  
+
   // Save the complete preset data
-  prefs.putBytes(String(presetId).c_str(), &presetData, sizeof(Preset));
+  Preset tmp = presetData;
+  if (tmp.name[0] == '\0')
+    snprintf(tmp.name, sizeof(tmp.name), "Preset %u", presetId);
+  prefs.putBytes(String(presetId).c_str(), &tmp, sizeof(Preset));
   Serial.printf("[DEBUG] Saved full preset ID %d, size: %d bytes\n", presetId, sizeof(Preset));
   
   // Update preset count
