@@ -131,11 +131,27 @@ import { buildFrame, parseFrame, CMD } from "./js/proto.js";
 
 window.addEventListener("DOMContentLoaded", async () => {
   /* ────────────────────────────────────────────────────────────
-     1.  Load presets → merge localStorage → populate dropdown → build initial model
+     1. GET ALL ELEMENT REFERENCES FIRST
+     ──────────────────────────────────────────────────────────── */
+  const logBox = document.getElementById("log");
+  const dd = document.getElementById("preset-dd");
+  const runAll = document.getElementById("runAll");
+  const runYoke = document.getElementById("runYoke");
+  const runConveyor = document.getElementById("runConveyor");
+  
+  // ADD THESE MISSING REFERENCES:
+  const out_loopHeight = document.getElementById("out_loopHeight");
+  const out_holdHigh = document.getElementById("out_holdHigh");
+  const out_holdLow = document.getElementById("out_holdLow");
+  const out_stepsSec = document.getElementById("out_stepsSec");
+  const out_minTime = document.getElementById("out_minTime");
+  const out_maxAngle = document.getElementById("out_maxAngle");
+
+  /* ────────────────────────────────────────────────────────────
+     2. Load presets and model setup
      ──────────────────────────────────────────────────────────── */
   const presets = await ParameterModel.loadPresets();
   
-  // Merge localStorage presets
   const userPresets = localStorage.getItem("userPresets");
   if (userPresets) {
     try {
@@ -145,7 +161,6 @@ window.addEventListener("DOMContentLoaded", async () => {
     }
   }
   
-  const dd = document.getElementById("preset-dd");
   Object.keys(presets).forEach(name => {
     const opt = document.createElement("option");
     opt.value = opt.textContent = name;
@@ -155,52 +170,70 @@ window.addEventListener("DOMContentLoaded", async () => {
   let model = await ParameterModel.fromPreset(dd.value);
 
   /* ────────────────────────────────────────────────────────────
-     2.  Wire model → form and vice-versa
+     3. KEEP YOUR FUNCTIONS - JUST DEFINE THEM EARLY
      ──────────────────────────────────────────────────────────── */
-  bindModelToForm(model);
-
-  model.addEventListener("preset",  () => bindModelToForm(model));
-  model.addEventListener("change", (e) => {
-    updateDerived(model);
-    
-    // If geometry changed and affected rise/fall times, update those input fields too
-    if (['minAngleRaw', 'maxAngleRaw', 'degSec', 'yokeLength', 'loopHeightInput'].includes(e.detail.field)) {
-      document.querySelector('input[name="riseTimeRaw"]').value = model.riseTimeRaw;
-      document.querySelector('input[name="fallTimeRaw"]').value = model.fallTimeRaw;
-    }
-  });
-
-  /* ────────────────────────────────────────────────────────────
-     3.  WebSocket setup with verbose logging + debouncing
-     ──────────────────────────────────────────────────────────── */
-  const ws = new WebSocket(`ws://${location.host}/ws`);
-  ws.binaryType = "arraybuffer";
-  const logBox = document.getElementById("log");
-  const pendingDict = {};
+  function bindModelToForm(m) {
+    Object.entries(m.toJSON()).forEach(([k, v]) => {
+      const ip = document.querySelector(`input[name="${k}"]`);
+      if (!ip) return;
+      if (ip.type === "checkbox") ip.checked = !!v;
+      else ip.value = v;
+    });
+    runYoke.checked = !!m.runYoke;
+    runConveyor.checked = !!m.runConveyor;
+    updateRunAllState(); // Use the proper function instead of direct assignment
+    updateDerived(m);
+  }
   
-  // Debouncing mechanism
-  let sendTimeout = null;
-  const DEBOUNCE_DELAY = 300;
+  function updateDerived(m) {
+    out_loopHeight.textContent = m.loopHeight.toFixed(2);
+    out_holdHigh.textContent = m.holdHighCalc.toFixed(3);
+    out_holdLow.textContent = m.holdLowCalc.toFixed(3);
+    out_stepsSec.textContent = m.stepsSecCalc.toFixed(2);
+    out_minTime.textContent = m.minTime.toFixed(4);
+    out_maxAngle.textContent = m.maxAngle.toFixed(2);
+  }
 
-  // Add human-readable parameter names
-  const ParamNames = {
-    0x01: "Rise Time",
-    0x02: "Fall Time", 
-    0x03: "Hold High",
-    0x04: "Hold Low",
-    0x05: "Min Angle",
-    0x06: "Max Angle",
-    0x07: "Steps/Sec",
-    0x08: "Servo PWM Min",
-    0x09: "Servo PWM Max",
-    0x10: "Run Yoke",
-    0x11: "Run Conveyor"
-  };
+  function updateRunAllState() {
+    const yokeRunning = runYoke.checked;
+    const conveyorRunning = runConveyor.checked;
+    
+    if (yokeRunning && conveyorRunning) {
+      runAll.checked = true;
+      runAll.indeterminate = false;
+    } else if (!yokeRunning && !conveyorRunning) {
+      runAll.checked = false;
+      runAll.indeterminate = false;
+    } else {
+      runAll.checked = false;
+      runAll.indeterminate = true;
+    }
+  }
 
   function log(line) {
     logBox.value += line + "\n";
     logBox.scrollTop = logBox.scrollHeight;
   }
+
+  function setDisabled(state) {
+    document.querySelectorAll("input,button").forEach(el => el.disabled = state);
+  }
+
+  /* ────────────────────────────────────────────────────────────
+     4. WebSocket and communication setup
+     ──────────────────────────────────────────────────────────── */
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.binaryType = "arraybuffer";
+  const pendingDict = {};
+  
+  let sendTimeout = null;
+  const DEBOUNCE_DELAY = 300;
+
+  const ParamNames = {
+    0x01: "Rise Time", 0x02: "Fall Time", 0x03: "Hold High", 0x04: "Hold Low",
+    0x05: "Min Angle", 0x06: "Max Angle", 0x07: "Steps/Sec",
+    0x08: "Servo PWM Min", 0x09: "Servo PWM Max", 0x10: "Run Yoke", 0x11: "Run Conveyor"
+  };
   
   function sendFrame(cmd, id, val = 0) {
     ws.send(buildFrame(cmd, id, val));
@@ -228,95 +261,97 @@ window.addEventListener("DOMContentLoaded", async () => {
     sendFrame(CMD.TOGGLE, id, val ? 1 : 0);
   }
 
-  function syncRunAllCheckbox() {
-    runAll.checked = runYoke.checked && runConveyor.checked;
-  }
-
-  function setBothRuns(state) {
-    // Update checkboxes visually
-    runYoke.checked = runConveyor.checked = state;
-    syncRunAllCheckbox();
-
-    // Tell the MCU (two binary frames)
-    queueToggle(NameToID.runYoke,      state);
-    queueToggle(NameToID.runConveyor,  state);
-  }
-
-  function setDisabled(state) {
-    document.querySelectorAll("input,button").forEach(el => el.disabled = state);
+  function updateDerivedMCUParams() {
+    const derivedUpdates = {
+      [NameToID.holdHighRaw]: model.holdHighCalc,
+      [NameToID.holdLowRaw]: model.holdLowCalc,
+      [NameToID.stepsPerSecondRaw]: model.stepsSecCalc,
+      [NameToID.maxAngleRaw]: model.maxAngle
+    };
+    
+    Object.assign(pendingDict, derivedUpdates);
+    scheduleSend();
+    
+    model.holdHighRaw = model.holdHighCalc;
+    model.holdLowRaw = model.holdLowCalc;
+    model.stepsPerSecondRaw = model.stepsSecCalc;
+    model.maxAngleRaw = model.maxAngle;
   }
 
   /* ────────────────────────────────────────────────────────────
-     4.  Input handlers with debouncing
+     5. Initialize UI
+     ──────────────────────────────────────────────────────────── */
+  bindModelToForm(model);
+
+  model.addEventListener("preset", () => bindModelToForm(model));
+  model.addEventListener("change", (e) => {
+    updateDerived(model);
+    
+    if (['minAngleRaw', 'maxAngleRaw', 'degSec', 'yokeLength', 'loopHeightInput'].includes(e.detail.field)) {
+      document.querySelector('input[name="riseTimeRaw"]').value = model.riseTimeRaw;
+      document.querySelector('input[name="fallTimeRaw"]').value = model.fallTimeRaw;
+    }
+  });
+
+  /* ────────────────────────────────────────────────────────────
+     6. Input handlers
      ──────────────────────────────────────────────────────────── */
   document.querySelectorAll("input[type=number]").forEach(ip => {
-    // Use 'input' for immediate visual feedback, but validate on 'change'
     ip.addEventListener("input", () => {
-      // Only update derived display, don't update model yet
       updateDerived(model);
     });
     
-    // Use 'change' for actual model updates and MCU communication
     ip.addEventListener("change", () => {
       const newValue = Number(ip.value);
-      if (isNaN(newValue)) return; // Skip invalid numbers
+      if (isNaN(newValue)) return;
       
       model.update(ip.name, newValue);
-      ip.value = model[ip.name]; // Show clamped value if needed
+      ip.value = model[ip.name];
       
-      // Send MCU parameters
       if (NameToID[ip.name]) {
         pendingDict[NameToID[ip.name]] = model[ip.name];
         scheduleSend();
-      }
-      // For UI-only parameters, update derived MCU values
-      else if (['feedRate', 'loopHeightInput', 'loopLength', 'retractLength', 'degSec', 'yokeLength', 'muSteps', 'degStep', 'driveDiameter'].includes(ip.name)) {
+      } else if (['feedRate', 'loopHeightInput', 'loopLength', 'retractLength', 'degSec', 'yokeLength', 'muSteps', 'degStep', 'driveDiameter'].includes(ip.name)) {
         updateDerivedMCUParams();
       }
     });
   });
 
-  // Function to update MCU parameters based on derived calculations
-  function updateDerivedMCUParams() {
-    // Update the MCU parameters that are calculated from UI inputs
-    const derivedUpdates = {
-      [NameToID.holdHighRaw]: model.holdHighCalc,
-      [NameToID.holdLowRaw]: model.holdLowCalc,
-      [NameToID.stepsPerSecondRaw]: model.stepsSecCalc,
-      [NameToID.maxAngleRaw]: model.maxAngle  // ADD THIS LINE
-    };
-    
-    // Queue all derived updates
-    Object.assign(pendingDict, derivedUpdates);
-    scheduleSend();
-    
-    // Also update the model's MCU fields to keep everything in sync
-    model.holdHighRaw = model.holdHighCalc;
-    model.holdLowRaw = model.holdLowCalc;
-    model.stepsPerSecondRaw = model.stepsSecCalc;
-    model.maxAngleRaw = model.maxAngle;  // ADD THIS LINE TOO
-  }
-
-  runYoke     .addEventListener("change", e => {
+  /* ────────────────────────────────────────────────────────────
+     7. Event handlers
+     ──────────────────────────────────────────────────────────── */
+  runYoke.addEventListener("change", e => {
     queueToggle(NameToID.runYoke, e.target.checked);
-    syncRunAllCheckbox();
+    updateRunAllState();
   });
-  runConveyor .addEventListener("change", e => {
+  
+  runConveyor.addEventListener("change", e => {
     queueToggle(NameToID.runConveyor, e.target.checked);
-    syncRunAllCheckbox();
+    updateRunAllState();
   });
 
-  /* NEW master checkbox */
-  runAll .addEventListener("change", e => setBothRuns(e.target.checked));
-
-  dd.addEventListener("change", () => model.applyPreset(dd.value, presets));
+  runAll.addEventListener("change", e => {
+    const isRunning = e.target.checked;
+    runYoke.checked = isRunning;
+    runConveyor.checked = isRunning;
+    queueToggle(NameToID.runYoke, isRunning);
+    queueToggle(NameToID.runConveyor, isRunning);
+  });
 
   /* ────────────────────────────────────────────────────────────
-     5.  WebSocket event handlers
+     8. WebSocket handlers (SINGLE INSTANCE ONLY)
      ──────────────────────────────────────────────────────────── */
-  ws.addEventListener("open", () => {
+  ws.addEventListener("open", async () => {
     log(`✓ Connected to ${ws.url}`);
     setDisabled(false);
+    
+    // ADD THIS: Load ESP32 presets when connecting
+    try {
+      await loadESP32PresetList();
+      log(`✓ Loaded ${esp32Presets.size} presets from ESP32`);
+    } catch (error) {
+      log(`✗ Failed to load ESP32 presets: ${error.message}`);
+    }
   });
 
   ws.addEventListener("message", ev => {
@@ -325,14 +360,24 @@ window.addEventListener("DOMContentLoaded", async () => {
     if (!info || info.cmd !== CMD.ACK) return;
 
     const field = IDToName[info.id];
-    if (field) model.update(field, info.value);
-    if (field === "runYoke" || field === "runConveyor") syncRunAllCheckbox();
+    if (field) {
+      model.update(field, info.value);
+      if (field === "runYoke" || field === "runConveyor") {
+        updateRunAllState();
+      }
+    }
+    
+    // Emit event for preset management
+    window.dispatchEvent(new CustomEvent('esp32-ack', {
+      detail: { id: info.id, value: info.value }
+    }));
+    
     const paramName = ParamNames[info.id] || `0x${info.id.toString(16).padStart(2,"0")}`;
     log(`← ACK ${paramName}: ${info.value}`);
   });
 
   /* ────────────────────────────────────────────────────────────
-     6.  Button event handlers
+     9. Button handlers
      ──────────────────────────────────────────────────────────── */
   document.getElementById("sendAll").addEventListener("click", () => {
     const serialDict = model.toSerialDict();
@@ -352,45 +397,254 @@ window.addEventListener("DOMContentLoaded", async () => {
     log("→ LOAD_NVS");
   });
 
-  document.getElementById("savePreset").addEventListener("click", () => {
+  /* ────────────────────────────────────────────────────────────
+     10. Preset management (SINGLE DROPDOWN HANDLER)
+     ──────────────────────────────────────────────────────────── */
+  let nextPresetId = 1;
+  let esp32Presets = new Map();
+
+  // Enhanced savePreset handler - sends ALL browser fields
+  document.getElementById("savePreset").addEventListener("click", async () => {
     const name = prompt("Preset name:");
     if (!name) return;
 
-    presets[name] = model.toJSON();
+    try {
+      // Create full preset with ALL browser fields
+      const fullPreset = createFullPreset();
+      
+      // Save to browser localStorage
+      presets[name] = fullPreset;
+      
+      // Save to browser localStorage
+      const userPresets = {};
+      Object.keys(presets).forEach(key => {
+        if (key !== "Default") userPresets[key] = presets[key];
+      });
+      localStorage.setItem("userPresets", JSON.stringify(userPresets));
 
-    const opt = document.createElement("option");
-    opt.value = opt.textContent = name;
-    dd.appendChild(opt);
+      // Save to ESP32 NVS with ALL fields
+      await saveFullPresetToESP32(nextPresetId, name, fullPreset);
+      esp32Presets.set(nextPresetId, name);
+      
+      // Add to dropdown
+      const opt = document.createElement("option");
+      opt.value = opt.textContent = name;
+      opt.dataset.presetId = nextPresetId;
+      opt.dataset.presetName = name;
+      dd.appendChild(opt);
 
-    const userPresets = {};
-    Object.keys(presets).forEach(key => {
-      if (key !== "Default") userPresets[key] = presets[key];
-    });
-    localStorage.setItem("userPresets", JSON.stringify(userPresets));
-
-    log(`✓ Saved preset: ${name}`);
+      nextPresetId++;
+      log(`✓ Saved preset "${name}" (ID: ${nextPresetId-1}) with all fields to ESP32 NVS`);
+    } catch (error) {
+      log(`✗ Failed to save preset: ${error.message}`);
+    }
   });
 
-  function bindModelToForm(m) {
-    Object.entries(m.toJSON()).forEach(([k, v]) => {
-      const ip = document.querySelector(`input[name="${k}"]`);
-      if (!ip) return;
-      if (ip.type === "checkbox") ip.checked = !!v;
-      else ip.value = v;
+  // Enhanced createFullPreset - gets ALL user-editable fields
+  function createFullPreset() {
+    const preset = {};
+    
+    // Get all input field values
+    document.querySelectorAll("input[type=number]").forEach(input => {
+      preset[input.name] = parseFloat(input.value) || 0;
     });
-    runYoke.checked = !!m.runYoke;
-    runConveyor.checked = !!m.runConveyor;
-    runAll.checked = model.runYoke && model.runConveyor;
-    updateDerived(m);
+    
+    // Get checkbox values
+    preset.runYoke = runYoke.checked;
+    preset.runConveyor = runConveyor.checked;
+    
+    return preset;
   }
-  
-  function updateDerived(m) {
-    out_loopHeight.textContent = m.loopHeight.toFixed(2);
-    out_holdHigh.textContent = m.holdHighCalc.toFixed(3);
-    out_holdLow.textContent = m.holdLowCalc.toFixed(3);
-    out_stepsSec.textContent = m.stepsSecCalc.toFixed(2);
-    out_minTime.textContent = m.minTime.toFixed(4);
-    out_maxAngle.textContent = m.maxAngle.toFixed(2);
+
+  // Enhanced save function that sends all browser fields to ESP32
+  async function saveFullPresetToESP32(presetId, presetName, presetData) {
+    return new Promise(async (resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error("Timeout waiting for ESP32 preset save"));
+      }, 10000);
+
+      let fieldsToSend = 0;
+      let fieldsReceived = 0;
+
+      const handleSaveAck = (event) => {
+        const { id, value } = event.detail;
+        
+        if (id === 0xF9 && value === presetId) {
+          // ESP32 ready to receive field data
+          sendAllFieldsToESP32(presetData);
+          return;
+        }
+        
+        if (id === 0xFA) {
+          // Field received confirmation
+          fieldsReceived++;
+          if (fieldsReceived >= fieldsToSend) {
+            // All fields sent, complete the save
+            sendFrame(CMD_SAVE_PRESET_COMPLETE, 0x00, presetId);
+          }
+          return;
+        }
+        
+        if (id === 0xF1 && value === presetId) {
+          // Save complete
+          clearTimeout(timeout);
+          window.removeEventListener('esp32-ack', handleSaveAck);
+          resolve();
+        }
+      };
+
+      const sendAllFieldsToESP32 = (data) => {
+        const fieldMap = {
+          feedRate: 0x20,
+          loopHeightInput: 0x21,
+          loopLength: 0x22,
+          retractLength: 0x23,
+          degSec: 0x24,
+          yokeLength: 0x25,
+          muSteps: 0x26,
+          degStep: 0x27,
+          driveDiameter: 0x28,
+          minAngleRaw: 0x29,
+          servoPwmMin: 0x2A,
+          servoPwmMax: 0x2B
+        };
+        
+        fieldsToSend = Object.keys(fieldMap).length;
+        
+        // Send each field
+        Object.entries(fieldMap).forEach(([fieldName, fieldId]) => {
+          const value = data[fieldName] || 0;
+          sendFrame(CMD_SAVE_PRESET_FIELD, fieldId, value);
+        });
+      };
+
+      window.addEventListener('esp32-ack', handleSaveAck);
+      
+      // Start the save process
+      sendFrame(CMD_SAVE_PRESET_WITH_DATA, 0x00, presetId);
+    });
+  }
+
+  // Enhanced load function that restores ALL fields
+  async function loadPresetFromESP32(presetId) {
+    return new Promise((resolve, reject) => {
+      let receivedData = {};
+      
+      const timeout = setTimeout(() => {
+        reject(new Error("Timeout waiting for ESP32 preset load"));
+      }, 5000);
+
+      const handleLoadAck = (event) => {
+        const { id, value } = event.detail;
+        
+        if (id === 0xF2 && value === presetId) {
+          // Load complete
+          clearTimeout(timeout);
+          window.removeEventListener('esp32-ack', handleLoadAck);
+          
+          // Apply ALL received data
+          applyFullPreset(receivedData);
+          resolve();
+          return;
+        }
+        
+        // Map received field IDs back to field names
+        const fieldMap = {
+          0x20: 'feedRate',
+          0x21: 'loopHeightInput',
+          0x22: 'loopLength',
+          0x23: 'retractLength',
+          0x24: 'degSec',
+          0x25: 'yokeLength',
+          0x26: 'muSteps',
+          0x27: 'degStep',
+          0x28: 'driveDiameter',
+          0x29: 'minAngleRaw',
+          0x2A: 'servoPwmMin',
+          0x2B: 'servoPwmMax'
+        };
+        
+        if (fieldMap[id]) {
+          receivedData[fieldMap[id]] = value;
+        }
+        
+        // Also handle MCU parameters
+        const mcuField = IDToName[id];
+        if (mcuField) {
+          receivedData[mcuField] = value;
+        }
+      };
+
+      window.addEventListener('esp32-ack', handleLoadAck);
+      sendFrame(CMD.LOAD_PRESET, 0x00, presetId);
+    });
+  }
+
+  // SINGLE dropdown handler - remove the duplicate one
+  dd.addEventListener("change", async () => {
+    const selectedPreset = dd.value;
+    const selectedOption = dd.options[dd.selectedIndex];
+    const presetId = selectedOption.dataset.presetId;
+
+    if (presets[selectedPreset] && !presetId) {
+      model.applyPreset(selectedPreset, presets);
+      
+      const serialDict = model.toSerialDict();
+      for (const [id, v] of Object.entries(serialDict)) {
+        sendFrame(CMD.SET, Number(id), v);
+      }
+      log(`✓ Loaded "${selectedPreset}" from browser storage`);
+    } else if (presetId) {
+      try {
+        await loadPresetFromESP32(parseInt(presetId));
+        log(`✓ Loaded "${selectedPreset}" (ID: ${presetId}) from ESP32 NVS`);
+      } catch (error) {
+        log(`✗ Failed to load preset from ESP32: ${error.message}`);
+      }
+    }
+  });
+
+  // Enhanced function to load ESP32 presets
+  async function loadESP32PresetList() {
+    return new Promise((resolve, reject) => {
+      esp32Presets.clear();
+      
+      const timeout = setTimeout(() => {
+        reject(new Error("Timeout waiting for ESP32 preset list"));
+      }, 5000);
+
+      const handlePresetListAck = (event) => {
+        const { id, value } = event.detail;
+        
+        if (id === 0xF3) { // PRESET_COUNT
+          // Count received - preset IDs will follow
+          return;
+        }
+        else if (id === 0xF5) { // PRESET_EXISTS
+          const presetId = value;
+          const presetName = `ESP32 Preset ${presetId}`;
+          esp32Presets.set(presetId, presetName);
+          
+          // Add to dropdown if not already there
+          const existingOption = dd.querySelector(`option[data-preset-id="${presetId}"]`);
+          if (!existingOption) {
+            const opt = document.createElement("option");
+            opt.value = opt.textContent = presetName;
+            opt.dataset.presetId = presetId;
+            opt.dataset.source = "esp32";
+            dd.appendChild(opt);
+          }
+        }
+        else if (id === 0xF8) { // LIST_END
+          clearTimeout(timeout);
+          window.removeEventListener('esp32-ack', handlePresetListAck);
+          resolve();
+        }
+      };
+
+      window.addEventListener('esp32-ack', handlePresetListAck);
+      sendFrame(CMD.LIST_PRESETS, 0x00, 0);
+    });
   }
 
   updateDerived(model);

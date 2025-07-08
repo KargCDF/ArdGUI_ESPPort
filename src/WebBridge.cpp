@@ -4,8 +4,10 @@
 #include <SPIFFS.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
+#include <ESPmDNS.h>
 
 #define AP_SSID  "ArdGUI_ESP32"
+#define MDNS_HOSTNAME "am"  // This makes it accessible as "am.local"
 
 /* ---------- internal: server + websocket objects ---------- */
 static AsyncWebServer  server(80);
@@ -40,15 +42,28 @@ void WebBridge_begin()
     Serial.printf("[WiFi] AP SSID '%s'  IP %s\n",
                   AP_SSID, WiFi.softAPIP().toString().c_str());
 
-    /* 3️Web server & WebSocket */
+    /* 3️Setup mDNS */
+    if (MDNS.begin(MDNS_HOSTNAME)) {
+        Serial.printf("[mDNS] Started - accessible at http://%s.local\n", MDNS_HOSTNAME);
+        
+        // Add service advertisement
+        MDNS.addService("http", "tcp", 80);
+        MDNS.addService("ws", "tcp", 80);  // WebSocket service
+        
+        // Add some service details
+        MDNS.addServiceTxt("http", "tcp", "board", "ESP32");
+        MDNS.addServiceTxt("http", "tcp", "path", "/");
+    } else {
+        Serial.println("[mDNS] Failed to start");
+    }
+
+    /* 4️Web server & WebSocket */
     ws.onEvent(onWsEvent);
     server.addHandler(&ws);
 
-    /* ---- serve everything under SPIFFS root ------------------- *
-     *   • request “/” → index.html                                *
-     *   • request “/css/styles.css” → /css/styles.css (etc.)      */
+    /* ---- serve everything under SPIFFS root ------------------- */
     server.serveStatic("/", SPIFFS, "/")
-          .setDefaultFile("index.html");           // auto-redirect “/”
+          .setDefaultFile("index.html");           // auto-redirect "/"
 
     /* nice-to-have 404 handler (optional) */
     server.onNotFound([](AsyncWebServerRequest *r){
@@ -59,7 +74,12 @@ void WebBridge_begin()
     Serial.println("[WEB] HTTP + WS started");
 }
 
-void WebBridge_loop()          { ws.cleanupClients(); }
+void WebBridge_loop()          
+{ 
+    ws.cleanupClients(); 
+    // ESP32 mDNS runs automatically - no update() needed
+}
+
 void WebBridge_sendFrame(const uint8_t *b, size_t n)
 {
     ws.binaryAll(const_cast<uint8_t *>(b), n);   // cast to match overload

@@ -6,7 +6,11 @@ export const CMD  = {
   GET:    0x03,
   ACK:    0x81,
   SAVE_NVS:   0x20,
-  LOAD_NVS:   0x21
+  LOAD_NVS:   0x21,
+  SAVE_PRESET: 0x30,  // NEW
+  LOAD_PRESET: 0x31,  // NEW
+  LIST_PRESETS: 0x32, // NEW
+  DELETE_PRESET: 0x33  // NEW
 };
 
 export function buildFrame(cmd, id, value = 0) {

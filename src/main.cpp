@@ -72,6 +72,13 @@ constexpr uint8_t CMD_GET   = 0x03;    // host → MCU
 constexpr uint8_t CMD_ACK   = 0x81;    // MCU  → host
 constexpr uint8_t CMD_SAVE_NVS = 0x20;   // host  → MCU : store current params
 constexpr uint8_t CMD_LOAD_NVS = 0x21;   // host  → MCU : reload params, ACK dump
+constexpr uint8_t CMD_SAVE_PRESET = 0x30;   // host → MCU: save current state as preset
+constexpr uint8_t CMD_LOAD_PRESET = 0x31;   // host → MCU: load preset by ID
+constexpr uint8_t CMD_LIST_PRESETS = 0x32;  // host → MCU: get count of saved presets
+constexpr uint8_t CMD_DELETE_PRESET = 0x33; // host → MCU: delete preset by ID
+constexpr uint8_t CMD_SAVE_PRESET_WITH_DATA = 0x34; // New command
+constexpr uint8_t CMD_SAVE_PRESET_FIELD = 0x35;
+constexpr uint8_t CMD_SAVE_PRESET_COMPLETE = 0x36;
 
 union FloatBytes { float f; uint8_t b[4]; };
 
@@ -80,6 +87,44 @@ struct Frame {
   FloatBytes data;
   uint8_t   crc;
 };
+
+/* =====================  PRESET STRUCTURE (IMPROVEMENT)  ========= */
+#pragma pack(1)  // Ensure no padding
+struct Preset {
+  // MCU parameters
+  float riseTime;
+  float fallTime;
+  float stayHigh;
+  float stayLow;
+  float minAngle;
+  float maxAngle;
+  float speedStepsPerSec;
+  float servoPwmMin;
+  float servoPwmMax;
+  
+  // Browser editable fields (ALL user inputs)
+  float feedRate;
+  float loopHeightInput;
+  float loopLength;
+  float retractLength;
+  float degSec;
+  float yokeLength;
+  float muSteps;
+  float degStep;
+  float driveDiameter;
+  float minAngleRaw;
+  float servoPwmMinUser;
+  float servoPwmMaxUser;
+  
+  // Checkboxes
+  uint8_t runYoke;
+  uint8_t runConveyor;
+};
+#pragma pack()
+
+/* =====================  PRESET TRANSFER GLOBALS  =============== */
+uint8_t currentPresetId = 0;
+Preset currentPresetData;
 
 /* =====================  FORWARD DECLARATIONS  =================== */
 void applyParam(uint8_t id, float val);
@@ -91,6 +136,11 @@ void IRAM_ATTR endstopISR();
 void sendFrame(uint8_t cmd, uint8_t id, float val);
 void saveToNVS();
 void loadFromNVS();
+void savePresetToNVS(uint8_t presetId);
+void loadPresetFromNVS(uint8_t presetId);
+uint8_t getPresetCount();
+void deletePresetFromNVS(uint8_t presetId);
+void savePresetToNVSWithData(uint8_t presetId, const Preset& presetData);
 
 /* =====================  TRANSPORT LAYER  ======================== *
  * Build a frame once → ship it over Serial **and** WebSocket      */
@@ -212,7 +262,7 @@ void sendFrame(uint8_t cmd, uint8_t id, float val)
 /* =====================  WS → MCU PARSER  (NEW) ================= */
 void processIncomingFrame(uint8_t *buf, size_t len)
 {
-  if (len != 8 || buf[0] != SYNC) return;         // size / preamble check
+  if (len != 8 || buf[0] != SYNC) return;
 
   uint8_t cmd = buf[1], id = buf[2];
   FloatBytes fb; memcpy(fb.b, &buf[3], 4);
@@ -220,20 +270,128 @@ void processIncomingFrame(uint8_t *buf, size_t len)
 
   uint8_t calc = cmd ^ id;
   for (uint8_t b : fb.b) calc ^= b;
-  if (calc != rxCrc) return;                      // CRC fail
+  if (calc != rxCrc) return;
 
   if (cmd == CMD_SAVE_NVS) {
       saveToNVS();
-      sendFrame(CMD_ACK, 0xF0, 1);            // 0xF0 = “SAVED”
+      sendFrame(CMD_ACK, 0xF0, 1);
       return;
   }
   else if (cmd == CMD_LOAD_NVS) {
       loadFromNVS();
       for (uint8_t id = ParamID_RISE_TIME_MS; id <= ParamID_RUN_CONVEYOR; ++id)
-          sendFrame(CMD_ACK, id, readParam(id));   // dump back to host
+          sendFrame(CMD_ACK, id, readParam(id));
       return;
   }
+  else if (cmd == CMD_SAVE_PRESET) {
+    uint8_t presetId = constrain((uint8_t)fb.f, 1, 100); // Safety check
+    savePresetToNVS(presetId);
+    sendFrame(CMD_ACK, 0xF1, presetId);
+    return;
+  }
+  else if (cmd == CMD_LOAD_PRESET) {
+    uint8_t presetId = constrain((uint8_t)fb.f, 1, 100); // Safety check
+    loadPresetFromNVS(presetId);
+    
+    // Send all parameters back
+    sendFrame(CMD_ACK, ParamID_RISE_TIME_MS, riseTime);
+    sendFrame(CMD_ACK, ParamID_FALL_TIME_MS, fallTime);
+    sendFrame(CMD_ACK, ParamID_HOLD_HIGH_MS, stayHigh);
+    sendFrame(CMD_ACK, ParamID_HOLD_LOW_MS, stayLow);
+    sendFrame(CMD_ACK, ParamID_MIN_ANGLE_DEG, minAngle);
+    sendFrame(CMD_ACK, ParamID_MAX_ANGLE_DEG, maxAngle);
+    sendFrame(CMD_ACK, ParamID_STEPS_PER_SEC, speedStepsPerSec);
+    sendFrame(CMD_ACK, ParamID_SERVO_PWM_MIN_US, servoPwmMin);
+    sendFrame(CMD_ACK, ParamID_SERVO_PWM_MAX_US, servoPwmMax);
+    sendFrame(CMD_ACK, ParamID_RUN_YOKE, yokeRunning ? 1.0f : 0.0f);
+    sendFrame(CMD_ACK, ParamID_RUN_CONVEYOR, conveyorRunning ? 1.0f : 0.0f);
+    
+    sendFrame(CMD_ACK, 0xF2, presetId);  // End marker
+    return;
+  }
+  else if (cmd == CMD_LIST_PRESETS) {
+    prefs.begin("presets", true);
+    uint8_t count = prefs.getUChar("count", 0);
+    
+    Serial.printf("[DEBUG] Sending preset count: %d\n", count);
+    sendFrame(CMD_ACK, 0xF3, count);
+    
+    // Send each existing preset ID
+    for (uint8_t i = 1; i <= 100; i++) {
+      if (prefs.isKey(String(i).c_str())) {
+        Serial.printf("[DEBUG] Found preset ID: %d\n", i);
+        sendFrame(CMD_ACK, 0xF5, i);  // 0xF5 = PRESET_EXISTS
+      }
+    }
+    
+    Serial.println("[DEBUG] Sending list end marker");
+    sendFrame(CMD_ACK, 0xF8, 0);  // 0xF8 = LIST_END
+    
+    prefs.end();
+    return;
+  }
+  else if (cmd == CMD_DELETE_PRESET) {
+    uint8_t presetId = constrain((uint8_t)fb.f, 1, 100); // Safety check
+    deletePresetFromNVS(presetId);
+    sendFrame(CMD_ACK, 0xF4, presetId);
+    return;
+  }
+  else if (cmd == CMD_SAVE_PRESET_WITH_DATA) {
+    // This command will be followed by individual field updates
+    uint8_t presetId = constrain((uint8_t)fb.f, 1, 100);
+    
+    // Store the preset ID for the upcoming data
+    currentPresetId = presetId;
+    currentPresetData = {}; // Reset struct
+    
+    // Copy current MCU values
+    currentPresetData.riseTime = riseTime;
+    currentPresetData.fallTime = fallTime;
+    currentPresetData.stayHigh = stayHigh;
+    currentPresetData.stayLow = stayLow;
+    currentPresetData.minAngle = minAngle;
+    currentPresetData.maxAngle = maxAngle;
+    currentPresetData.speedStepsPerSec = speedStepsPerSec;
+    currentPresetData.servoPwmMin = (float)servoPwmMin;
+    currentPresetData.servoPwmMax = (float)servoPwmMax;
+    currentPresetData.runYoke = yokeRunning ? 1 : 0;
+    currentPresetData.runConveyor = conveyorRunning ? 1 : 0;
+    
+    sendFrame(CMD_ACK, 0xF9, presetId); // Ready to receive data
+    return;
+  }
+  else if (cmd == CMD_SAVE_PRESET_FIELD) {
+    // Save individual field to current preset data
+    uint8_t fieldId = id;
+    float value = fb.f;
+    
+    switch(fieldId) {
+      case 0x20: currentPresetData.feedRate = value; break;
+      case 0x21: currentPresetData.loopHeightInput = value; break;
+      case 0x22: currentPresetData.loopLength = value; break;
+      case 0x23: currentPresetData.retractLength = value; break;
+      case 0x24: currentPresetData.degSec = value; break;
+      case 0x25: currentPresetData.yokeLength = value; break;
+      case 0x26: currentPresetData.muSteps = value; break;
+      case 0x27: currentPresetData.degStep = value; break;
+      case 0x28: currentPresetData.driveDiameter = value; break;
+      case 0x29: currentPresetData.minAngleRaw = value; break;
+      case 0x2A: currentPresetData.servoPwmMinUser = value; break;
+      case 0x2B: currentPresetData.servoPwmMaxUser = value; break;
+    }
+    
+    sendFrame(CMD_ACK, 0xFA, fieldId); // Field received
+    return;
+  }
+  else if (cmd == CMD_SAVE_PRESET_COMPLETE) {
+    // Finalize the preset save
+    uint8_t presetId = constrain((uint8_t)fb.f, 1, 100);
+    savePresetToNVSWithData(presetId, currentPresetData);
+    sendFrame(CMD_ACK, 0xF1, presetId); // Save complete
+    return;
+  }
 
+  // Handle regular commands
   if (cmd == CMD_SET || cmd == CMD_TOGGLE) {
     applyParam(id, fb.f);
     sendFrame(CMD_ACK, id, readParam(id));
@@ -416,6 +574,152 @@ void updateServo()
   }
 }
 
+/* =====================  IMPROVED PRESET MANAGEMENT (PURE BINARY) ============= */
+void savePresetToNVS(uint8_t presetId) {
+  if (presetId == 0 || presetId > 100) return;
+  
+  prefs.begin("presets", false);
+  
+  // Use struct for cleaner code - no strings, no magic numbers
+  Preset preset = {
+    .riseTime = riseTime,
+    .fallTime = fallTime,
+    .stayHigh = stayHigh,
+    .stayLow = stayLow,
+    .minAngle = minAngle,
+    .maxAngle = maxAngle,
+    .speedStepsPerSec = speedStepsPerSec,
+    .servoPwmMin = (float)servoPwmMin,
+    .servoPwmMax = (float)servoPwmMax
+  };
+  
+  // Save binary preset data directly using preset ID as key
+  prefs.putBytes(String(presetId).c_str(), &preset, sizeof(Preset));
+  Serial.printf("[DEBUG] Saved preset ID %d, size: %d bytes\n", presetId, sizeof(Preset));
+  
+  // Verify it was saved
+  if (prefs.isKey(String(presetId).c_str())) {
+    Serial.printf("[DEBUG] Preset %d successfully saved to NVS\n", presetId);
+  } else {
+    Serial.printf("[DEBUG] ERROR: Preset %d NOT found in NVS after save!\n", presetId);
+  }
+  
+  // Update preset count
+  uint8_t presetCount = prefs.getUChar("count", 0);
+  bool found = false;
+  for (uint8_t i = 1; i <= presetCount; i++) {
+    if (prefs.isKey(String(i).c_str())) {
+      if (i == presetId) {
+        found = true;
+        break;
+      }
+    }
+  }
+  if (!found && presetCount < 100) {  // Limit to 100 presets
+    prefs.putUChar("count", presetCount + 1);
+  }
+  
+  prefs.end();
+}
+
+void loadPresetFromNVS(uint8_t presetId) {
+  if (presetId == 0 || presetId > 100) return;
+  
+  prefs.begin("presets", true);
+  size_t dataSize = prefs.getBytesLength(String(presetId).c_str());
+  
+  if (dataSize == sizeof(Preset)) {
+    Preset preset;
+    size_t bytesRead = prefs.getBytes(String(presetId).c_str(), &preset, sizeof(Preset));
+    prefs.end();
+    
+    if (bytesRead == sizeof(Preset)) {
+      // Apply MCU values
+      riseTime = constrain(preset.riseTime, 1.0f, 10000.0f);
+      fallTime = constrain(preset.fallTime, 1.0f, 10000.0f);
+      stayHigh = constrain(preset.stayHigh, 0.0f, 10000.0f);
+      stayLow = constrain(preset.stayLow, 0.0f, 10000.0f);
+      minAngle = constrain(preset.minAngle, 0.0f, 180.0f);
+      maxAngle = constrain(preset.maxAngle, 0.0f, 180.0f);
+      speedStepsPerSec = constrain(preset.speedStepsPerSec, 1.0f, 10000.0f);
+      servoPwmMin = constrain((int)preset.servoPwmMin, 100, 3000);
+      servoPwmMax = constrain((int)preset.servoPwmMax, 100, 3000);
+      yokeRunning = preset.runYoke != 0;
+      conveyorRunning = preset.runConveyor != 0;
+      
+      // Update hardware
+      myServo.attach(PWM_PIN, servoPwmMin, servoPwmMax);
+      stepper.setMaxSpeed(speedStepsPerSec);
+      stepper.setSpeed(speedStepsPerSec);
+      
+      // Send MCU parameters
+      sendFrame(CMD_ACK, ParamID_RISE_TIME_MS, riseTime);
+      sendFrame(CMD_ACK, ParamID_FALL_TIME_MS, fallTime);
+      sendFrame(CMD_ACK, ParamID_HOLD_HIGH_MS, stayHigh);
+      sendFrame(CMD_ACK, ParamID_HOLD_LOW_MS, stayLow);
+      sendFrame(CMD_ACK, ParamID_MIN_ANGLE_DEG, minAngle);
+      sendFrame(CMD_ACK, ParamID_MAX_ANGLE_DEG, maxAngle);
+      sendFrame(CMD_ACK, ParamID_STEPS_PER_SEC, speedStepsPerSec);
+      sendFrame(CMD_ACK, ParamID_SERVO_PWM_MIN_US, servoPwmMin);
+      sendFrame(CMD_ACK, ParamID_SERVO_PWM_MAX_US, servoPwmMax);
+      sendFrame(CMD_ACK, ParamID_RUN_YOKE, yokeRunning ? 1.0f : 0.0f);
+      sendFrame(CMD_ACK, ParamID_RUN_CONVEYOR, conveyorRunning ? 1.0f : 0.0f);
+      
+      // Send browser fields
+      sendFrame(CMD_ACK, 0x20, preset.feedRate);
+      sendFrame(CMD_ACK, 0x21, preset.loopHeightInput);
+      sendFrame(CMD_ACK, 0x22, preset.loopLength);
+      sendFrame(CMD_ACK, 0x23, preset.retractLength);
+      sendFrame(CMD_ACK, 0x24, preset.degSec);
+      sendFrame(CMD_ACK, 0x25, preset.yokeLength);
+      sendFrame(CMD_ACK, 0x26, preset.muSteps);
+      sendFrame(CMD_ACK, 0x27, preset.degStep);
+      sendFrame(CMD_ACK, 0x28, preset.driveDiameter);
+      sendFrame(CMD_ACK, 0x29, preset.minAngleRaw);
+      sendFrame(CMD_ACK, 0x2A, preset.servoPwmMinUser);
+      sendFrame(CMD_ACK, 0x2B, preset.servoPwmMaxUser);
+      
+      sendFrame(CMD_ACK, 0xF2, presetId);  // End marker
+    }
+  } else {
+    prefs.end();
+  }
+}
+
+uint8_t getPresetCount() {
+  prefs.begin("presets", true);
+  uint8_t count = prefs.getUChar("count", 0);
+  prefs.end();
+  return min(count, (uint8_t)100); // Cap at 100
+}
+
+void deletePresetFromNVS(uint8_t presetId) {
+  if (presetId == 0 || presetId > 100) return; // Safety check
+  
+  prefs.begin("presets", false);
+  prefs.remove(String(presetId).c_str());
+  
+  // Update count (scan for remaining presets)
+  uint8_t activeCount = 0;
+  for (uint8_t i = 1; i <= 100; i++) {
+    if (prefs.isKey(String(i).c_str())) {
+      activeCount++;
+    }
+  }
+  prefs.putUChar("count", activeCount);
+  prefs.end();
+}
+
+/* =====================  ISR  ================================== */
+void IRAM_ATTR endstopISR()
+{
+  unsigned long now = micros();
+  if (now - lastEndstopMicros >= DEBOUNCE_US) {
+    lastEndstopMicros = now;
+    endstopEvent = true;
+  }
+}
+
 /* =====================  SETUP  ================================= */
 void setup()
 {
@@ -450,7 +754,6 @@ void loop()
   updateServo();
   if (conveyorRunning) stepper.runSpeed();
 
-  /* ------ ENDSTOP event (debounced in ISR) ------ */
   if (endstopEvent) {
     noInterrupts();
     endstopEvent = false;
@@ -466,15 +769,34 @@ void loop()
     sendFrame(CMD_ACK, ParamID_RUN_CONVEYOR,  newConvState);
   }
 
-  WebBridge_loop();           // ★ house-keeping for AsyncWebServer
+  WebBridge_loop();
 }
 
-/* =====================  ISR  ================================== */
-void IRAM_ATTR endstopISR()
-{
-  unsigned long now = micros();
-  if (now - lastEndstopMicros >= DEBOUNCE_US) {
-    lastEndstopMicros = now;
-    endstopEvent = true;
+// Add this function after the existing savePresetToNVS function (around line 650):
+
+void savePresetToNVSWithData(uint8_t presetId, const Preset& presetData) {
+  if (presetId == 0 || presetId > 100) return;
+  
+  prefs.begin("presets", false);
+  
+  // Save the complete preset data
+  prefs.putBytes(String(presetId).c_str(), &presetData, sizeof(Preset));
+  Serial.printf("[DEBUG] Saved full preset ID %d, size: %d bytes\n", presetId, sizeof(Preset));
+  
+  // Update preset count
+  uint8_t presetCount = prefs.getUChar("count", 0);
+  bool found = false;
+  for (uint8_t i = 1; i <= presetCount; i++) {
+    if (prefs.isKey(String(i).c_str())) {
+      if (i == presetId) {
+        found = true;
+        break;
+      }
+    }
   }
+  if (!found && presetCount < 100) {
+    prefs.putUChar("count", presetCount + 1);
+  }
+  
+  prefs.end();
 }
