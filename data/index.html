@@ -478,7 +478,7 @@ window.addEventListener("DOMContentLoaded", async () => {
           fieldsReceived++;
           if (fieldsReceived >= fieldsToSend) {
             // All fields sent, complete the save
-            sendFrame(CMD_SAVE_PRESET_COMPLETE, 0x00, presetId);
+            sendFrame(CMD.SAVE_PRESET_COMPLETE, 0x00, presetId);
           }
           return;
         }
@@ -512,7 +512,7 @@ window.addEventListener("DOMContentLoaded", async () => {
         // Send each field
         Object.entries(fieldMap).forEach(([fieldName, fieldId]) => {
           const value = data[fieldName] || 0;
-          sendFrame(CMD_SAVE_PRESET_FIELD, fieldId, value);
+          sendFrame(CMD.SAVE_PRESET_FIELD, fieldId, value);
         });
 
         const enc = new TextEncoder();
@@ -523,14 +523,14 @@ window.addEventListener("DOMContentLoaded", async () => {
         for (let i = 0; i < nameChunks; i++) {
           const dv = new DataView(bytes.buffer, i * 4, 4);
           const floatVal = dv.getFloat32(0, true);
-          sendFrame(CMD_SAVE_PRESET_FIELD, 0x30 + i, floatVal);
+          sendFrame(CMD.SAVE_PRESET_FIELD, 0x30 + i, floatVal);
         }
       };
 
       window.addEventListener('esp32-ack', handleSaveAck);
       
       // Start the save process
-      sendFrame(CMD_SAVE_PRESET_WITH_DATA, 0x00, presetId);
+      sendFrame(CMD.SAVE_PRESET_WITH_DATA, 0x00, presetId);
     });
   }
 

@@ -10,7 +10,10 @@ export const CMD  = {
   SAVE_PRESET: 0x30,  // NEW
   LOAD_PRESET: 0x31,  // NEW
   LIST_PRESETS: 0x32, // NEW
-  DELETE_PRESET: 0x33  // NEW
+  DELETE_PRESET: 0x33, // NEW
+  SAVE_PRESET_WITH_DATA: 0x34,
+  SAVE_PRESET_FIELD: 0x35,
+  SAVE_PRESET_COMPLETE: 0x36
 };
 
 export function buildFrame(cmd, id, value = 0) {
