@@ -638,6 +638,11 @@ window.addEventListener("DOMContentLoaded", async () => {
         else if (id === 0xF8) { // LIST_END
           clearTimeout(timeout);
           window.removeEventListener('esp32-ack', handlePresetListAck);
+
+          // Determine the next available preset ID
+          const ids = Array.from(esp32Presets.keys());
+          nextPresetId = ids.length > 0 ? Math.max(...ids) + 1 : 1;
+
           resolve();
         }
       };
