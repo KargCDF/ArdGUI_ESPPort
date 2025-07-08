@@ -745,9 +745,7 @@ void setup()
 {
   Serial.begin(115200);
 
-  prefs.begin("params", /*rw=*/false);   // open read-only first
-  loadFromNVS();                         // <— new helper (below)
-  prefs.end();
+  loadFromNVS();
 
   myServo.attach(PWM_PIN, servoPwmMin, servoPwmMax);
   currAngle = minAngle;  // Initialize current angle
