@@ -148,26 +148,9 @@ window.addEventListener("DOMContentLoaded", async () => {
   const out_maxAngle = document.getElementById("out_maxAngle");
 
   /* ────────────────────────────────────────────────────────────
-     2. Load presets and model setup
+     2. Model setup
      ──────────────────────────────────────────────────────────── */
-  const presets = await ParameterModel.loadPresets();
-  
-  const userPresets = localStorage.getItem("userPresets");
-  if (userPresets) {
-    try {
-      Object.assign(presets, JSON.parse(userPresets));
-    } catch (e) {
-      console.warn("Failed to parse user presets from localStorage:", e);
-    }
-  }
-  
-  Object.keys(presets).forEach(name => {
-    const opt = document.createElement("option");
-    opt.value = opt.textContent = name;
-    dd.appendChild(opt);
-  });
-
-  let model = await ParameterModel.fromPreset(dd.value);
+  const model = new ParameterModel();
 
   /* ────────────────────────────────────────────────────────────
      3. KEEP YOUR FUNCTIONS - JUST DEFINE THEM EARLY
@@ -344,10 +327,13 @@ window.addEventListener("DOMContentLoaded", async () => {
   ws.addEventListener("open", async () => {
     log(`✓ Connected to ${ws.url}`);
     setDisabled(false);
-    
-    // ADD THIS: Load ESP32 presets when connecting
+
+    // Populate dropdown with presets from the ESP32 only
+    dd.innerHTML = "";
     try {
       await loadESP32PresetList();
+      const maxId = Math.max(0, ...Array.from(esp32Presets.keys()));
+      nextPresetId = maxId + 1;
       log(`✓ Loaded ${esp32Presets.size} presets from ESP32`);
     } catch (error) {
       log(`✗ Failed to load ESP32 presets: ${error.message}`);
@@ -403,26 +389,14 @@ window.addEventListener("DOMContentLoaded", async () => {
   let nextPresetId = 1;
   let esp32Presets = new Map();
 
-  // Enhanced savePreset handler - sends ALL browser fields
+  // Enhanced savePreset handler - sends ALL browser fields directly to ESP32
   document.getElementById("savePreset").addEventListener("click", async () => {
     const name = prompt("Preset name:");
     if (!name) return;
 
     try {
-      // Create full preset with ALL browser fields
       const fullPreset = createFullPreset();
-      
-      // Save to browser localStorage
-      presets[name] = fullPreset;
-      
-      // Save to browser localStorage
-      const userPresets = {};
-      Object.keys(presets).forEach(key => {
-        if (key !== "Default") userPresets[key] = presets[key];
-      });
-      localStorage.setItem("userPresets", JSON.stringify(userPresets));
 
-      // Save to ESP32 NVS with ALL fields
       await saveFullPresetToESP32(nextPresetId, name, fullPreset);
       esp32Presets.set(nextPresetId, name);
       
@@ -582,22 +556,13 @@ window.addEventListener("DOMContentLoaded", async () => {
 
   // SINGLE dropdown handler - remove the duplicate one
   dd.addEventListener("change", async () => {
-    const selectedPreset = dd.value;
     const selectedOption = dd.options[dd.selectedIndex];
     const presetId = selectedOption.dataset.presetId;
 
-    if (presets[selectedPreset] && !presetId) {
-      model.applyPreset(selectedPreset, presets);
-      
-      const serialDict = model.toSerialDict();
-      for (const [id, v] of Object.entries(serialDict)) {
-        sendFrame(CMD.SET, Number(id), v);
-      }
-      log(`✓ Loaded "${selectedPreset}" from browser storage`);
-    } else if (presetId) {
+    if (presetId) {
       try {
         await loadPresetFromESP32(parseInt(presetId));
-        log(`✓ Loaded "${selectedPreset}" (ID: ${presetId}) from ESP32 NVS`);
+        log(`✓ Loaded "${dd.value}" (ID: ${presetId}) from ESP32 NVS`);
       } catch (error) {
         log(`✗ Failed to load preset from ESP32: ${error.message}`);
       }
