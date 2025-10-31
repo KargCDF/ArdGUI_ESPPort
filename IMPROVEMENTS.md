@@ -105,11 +105,20 @@ This document tracks the implementation of improvements identified in the code r
   - Result: O(1) instead of O(n) for preset count updates
   - Completed: 2025-10-31
 
-### 📋 Planned
+### ✅ Completed
 
-- [ ] **Task 3.1**: Refactor command handling (3 hours)
-  - Use command dispatch table
-  - Status: Pending
+- [x] **Task 3.1**: Refactor command handling (3 hours)
+  - File: `src/main.cpp:363-575`
+  - Created `CommandHandler` function pointer type
+  - Extracted 12 individual command handler functions
+  - Created dispatch table mapping command bytes to handlers
+  - Simplified `processIncomingFrame()` from 167 lines to 41 lines
+  - Improved code organization and maintainability
+  - Added proper logging for unknown commands
+  - Result: Cleaner architecture, easier to add new commands
+  - Completed: 2025-10-31
+
+### 📋 Planned
 
 - [ ] **Task 3.2**: Split HTML into modules (4 hours)
   - Create separate JS files
@@ -205,3 +214,4 @@ pio test
 - **2025-10-31**: Completed Task 2.3 (Eliminate code duplication)
 - **2025-10-31**: Completed Task 3.3 (Debounce WebSocket cleanup)
 - **2025-10-31**: Completed Task 3.4 (Optimize preset scanning)
+- **2025-10-31**: Completed Task 3.1 (Refactor command handling with dispatch table)

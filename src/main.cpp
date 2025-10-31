@@ -360,9 +360,181 @@ uint8_t scanActivePresetCount()
   return count;
 }
 
-/* =====================  WS → MCU PARSER  (NEW) ================= */
+/* =====================  COMMAND HANDLERS  ======================= */
+// Function pointer type for command handlers
+using CommandHandler = void (*)(uint8_t id, float value);
+
+// Individual command handler functions
+static void handleSaveNVS(uint8_t /*id*/, float /*value*/) {
+  saveToNVS();
+  sendFrame(CMD_ACK, Config::ProtocolID::NVS_SAVE_ACK, 1);
+}
+
+static void handleLoadNVS(uint8_t /*id*/, float /*value*/) {
+  loadFromNVS();
+  for (uint8_t id = ParamID_RISE_TIME_MS; id <= ParamID_RUN_CONVEYOR; ++id)
+    sendFrame(CMD_ACK, id, readParam(id));
+}
+
+static void handleSavePreset(uint8_t /*id*/, float value) {
+  uint8_t presetId = constrain((uint8_t)value, Config::MIN_PRESET_ID, Config::MAX_PRESET_ID);
+  savePresetToNVS(presetId);
+  sendFrame(CMD_ACK, Config::ProtocolID::PRESET_SAVE_ACK, presetId);
+}
+
+static void handleLoadPreset(uint8_t /*id*/, float value) {
+  uint8_t presetId = constrain((uint8_t)value, Config::MIN_PRESET_ID, Config::MAX_PRESET_ID);
+  loadPresetFromNVS(presetId);
+  broadcastAllParameters();
+  sendFrame(CMD_ACK, Config::ProtocolID::PRESET_LOAD_END, presetId);
+}
+
+static void handleListPresets(uint8_t /*id*/, float /*value*/) {
+  if (!prefs.begin("presets", true)) {
+    LOG(LOG_ERROR, "Failed to open NVS namespace 'presets' for listing");
+    return;
+  }
+
+  uint8_t count = prefs.getUChar("count", 0);
+  LOG(LOG_INFO, "Listing %d presets", count);
+
+  sendFrame(CMD_ACK, Config::ProtocolID::PRESET_COUNT, count);
+
+  // Send each existing preset ID and name
+  for (uint8_t i = Config::MIN_PRESET_ID; i <= Config::MAX_PRESET_ID; i++) {
+    if (prefs.isKey(String(i).c_str())) {
+      Preset preset = {};
+      prefs.getBytes(String(i).c_str(), &preset, sizeof(Preset));
+      LOG(LOG_DEBUG, "Found preset ID %d: '%s'", i, preset.name);
+      sendFrame(CMD_ACK, Config::ProtocolID::PRESET_EXISTS, i);
+      for (uint8_t c = 0; c < 8; c++) {
+        FloatBytes fbName;
+        memcpy(fbName.b, &preset.name[c*4], 4);
+        sendFrame(CMD_ACK, Config::ProtocolID::PRESET_NAME_CHUNK, fbName.f);
+      }
+    }
+  }
+
+  LOG(LOG_DEBUG, "Preset list complete");
+  sendFrame(CMD_ACK, Config::ProtocolID::LIST_END, 0);
+
+  prefs.end();
+}
+
+static void handleDeletePreset(uint8_t /*id*/, float value) {
+  uint8_t presetId = constrain((uint8_t)value, Config::MIN_PRESET_ID, Config::MAX_PRESET_ID);
+  deletePresetFromNVS(presetId);
+  sendFrame(CMD_ACK, Config::ProtocolID::PRESET_DELETE_ACK, presetId);
+}
+
+static void handleSavePresetWithData(uint8_t /*id*/, float value) {
+  // This command will be followed by individual field updates
+  uint8_t presetId = constrain((uint8_t)value, Config::MIN_PRESET_ID, Config::MAX_PRESET_ID);
+
+  // Store the preset ID for the upcoming data
+  currentPresetId = presetId;
+  currentPresetData = {}; // Reset struct
+  memset(currentPresetData.name, 0, sizeof(currentPresetData.name));
+
+  // Copy current MCU values
+  currentPresetData.riseTime = riseTime;
+  currentPresetData.fallTime = fallTime;
+  currentPresetData.stayHigh = stayHigh;
+  currentPresetData.stayLow = stayLow;
+  currentPresetData.minAngle = minAngle;
+  currentPresetData.maxAngle = maxAngle;
+  currentPresetData.speedStepsPerSec = speedStepsPerSec;
+  currentPresetData.servoPwmMin = (float)servoPwmMin;
+  currentPresetData.servoPwmMax = (float)servoPwmMax;
+  currentPresetData.runYoke = yokeRunning ? 1 : 0;
+  currentPresetData.runConveyor = conveyorRunning ? 1 : 0;
+
+  sendFrame(CMD_ACK, Config::ProtocolID::PRESET_READY, presetId);
+}
+
+static void handleSavePresetField(uint8_t fieldId, float value) {
+  // Save individual field to current preset data
+  FloatBytes fb{ .f = value };
+
+  switch(fieldId) {
+    case 0x20: currentPresetData.feedRate = value; break;
+    case 0x21: currentPresetData.loopHeightInput = value; break;
+    case 0x22: currentPresetData.loopLength = value; break;
+    case 0x23: currentPresetData.retractLength = value; break;
+    case 0x24: currentPresetData.degSec = value; break;
+    case 0x25: currentPresetData.yokeLength = value; break;
+    case 0x26: currentPresetData.muSteps = value; break;
+    case 0x27: currentPresetData.degStep = value; break;
+    case 0x28: currentPresetData.driveDiameter = value; break;
+    case 0x29: currentPresetData.minAngleRaw = value; break;
+    case 0x2A: currentPresetData.servoPwmMinUser = value; break;
+    case 0x2B: currentPresetData.servoPwmMaxUser = value; break;
+    case 0x30: memcpy(&currentPresetData.name[0], fb.b, 4); break;
+    case 0x31: memcpy(&currentPresetData.name[4], fb.b, 4); break;
+    case 0x32: memcpy(&currentPresetData.name[8], fb.b, 4); break;
+    case 0x33: memcpy(&currentPresetData.name[12], fb.b, 4); break;
+    case 0x34: memcpy(&currentPresetData.name[16], fb.b, 4); break;
+    case 0x35: memcpy(&currentPresetData.name[20], fb.b, 4); break;
+    case 0x36: memcpy(&currentPresetData.name[24], fb.b, 4); break;
+    case 0x37: memcpy(&currentPresetData.name[28], fb.b, 4); break;
+  }
+
+  sendFrame(CMD_ACK, Config::ProtocolID::FIELD_ACK, fieldId);
+}
+
+static void handleSavePresetComplete(uint8_t /*id*/, float value) {
+  // Finalize the preset save
+  uint8_t presetId = constrain((uint8_t)value, Config::MIN_PRESET_ID, Config::MAX_PRESET_ID);
+  savePresetToNVSWithData(presetId, currentPresetData);
+  sendFrame(CMD_ACK, Config::ProtocolID::PRESET_SAVE_ACK, presetId);
+}
+
+static void handleSet(uint8_t id, float value) {
+  applyParam(id, value);
+  sendFrame(CMD_ACK, id, readParam(id));
+}
+
+static void handleToggle(uint8_t id, float value) {
+  applyParam(id, value);
+  sendFrame(CMD_ACK, id, readParam(id));
+}
+
+static void handleGet(uint8_t id, float /*value*/) {
+  if (id == 0x00) {
+    for (uint8_t pid = ParamID_RISE_TIME_MS; pid <= ParamID_RUN_CONVEYOR; ++pid)
+      sendFrame(CMD_ACK, pid, readParam(pid));
+  } else {
+    sendFrame(CMD_ACK, id, readParam(id));
+  }
+}
+
+/* =====================  COMMAND DISPATCH TABLE  ================= */
+struct CommandEntry {
+  uint8_t cmd;
+  CommandHandler handler;
+};
+
+static const CommandEntry commandTable[] = {
+  {CMD_SAVE_NVS,               handleSaveNVS},
+  {CMD_LOAD_NVS,               handleLoadNVS},
+  {CMD_SAVE_PRESET,            handleSavePreset},
+  {CMD_LOAD_PRESET,            handleLoadPreset},
+  {CMD_LIST_PRESETS,           handleListPresets},
+  {CMD_DELETE_PRESET,          handleDeletePreset},
+  {CMD_SAVE_PRESET_WITH_DATA,  handleSavePresetWithData},
+  {CMD_SAVE_PRESET_FIELD,      handleSavePresetField},
+  {CMD_SAVE_PRESET_COMPLETE,   handleSavePresetComplete},
+  {CMD_SET,                    handleSet},
+  {CMD_TOGGLE,                 handleToggle},
+  {CMD_GET,                    handleGet}
+};
+
+static constexpr size_t commandTableSize = sizeof(commandTable) / sizeof(CommandEntry);
+
+/* =====================  WS → MCU PARSER  (REFACTORED) ========== */
 void processIncomingFrame(uint8_t *buf, size_t len)
 {
+  // Validate frame structure
   if (len != 8) {
     LOG(LOG_ERROR, "Bad frame length: %d (expected 8)", len);
     return;
@@ -373,10 +545,12 @@ void processIncomingFrame(uint8_t *buf, size_t len)
     return;
   }
 
+  // Parse frame
   uint8_t cmd = buf[1], id = buf[2];
   FloatBytes fb; memcpy(fb.b, &buf[3], 4);
   uint8_t rxCrc = buf[7];
 
+  // Verify CRC
   uint8_t calc = cmd ^ id;
   for (uint8_t b : fb.b) calc ^= b;
 
@@ -388,145 +562,16 @@ void processIncomingFrame(uint8_t *buf, size_t len)
 
   LOG(LOG_DEBUG, "RX cmd=0x%02X id=0x%02X val=%.2f", cmd, id, fb.f);
 
-  if (cmd == CMD_SAVE_NVS) {
-      saveToNVS();
-      sendFrame(CMD_ACK, Config::ProtocolID::NVS_SAVE_ACK, 1);
-      return;
-  }
-  else if (cmd == CMD_LOAD_NVS) {
-      loadFromNVS();
-      for (uint8_t id = ParamID_RISE_TIME_MS; id <= ParamID_RUN_CONVEYOR; ++id)
-          sendFrame(CMD_ACK, id, readParam(id));
-      return;
-  }
-  else if (cmd == CMD_SAVE_PRESET) {
-    uint8_t presetId = constrain((uint8_t)fb.f, Config::MIN_PRESET_ID, Config::MAX_PRESET_ID);
-    savePresetToNVS(presetId);
-    sendFrame(CMD_ACK, Config::ProtocolID::PRESET_SAVE_ACK, presetId);
-    return;
-  }
-  else if (cmd == CMD_LOAD_PRESET) {
-    uint8_t presetId = constrain((uint8_t)fb.f, Config::MIN_PRESET_ID, Config::MAX_PRESET_ID);
-    loadPresetFromNVS(presetId);
-    broadcastAllParameters();
-    sendFrame(CMD_ACK, Config::ProtocolID::PRESET_LOAD_END, presetId);
-    return;
-  }
-  else if (cmd == CMD_LIST_PRESETS) {
-    if (!prefs.begin("presets", true)) {
-      LOG(LOG_ERROR, "Failed to open NVS namespace 'presets' for listing");
+  // Dispatch to handler
+  for (size_t i = 0; i < commandTableSize; i++) {
+    if (commandTable[i].cmd == cmd) {
+      commandTable[i].handler(id, fb.f);
       return;
     }
-
-    uint8_t count = prefs.getUChar("count", 0);
-    LOG(LOG_INFO, "Listing %d presets", count);
-
-    sendFrame(CMD_ACK, Config::ProtocolID::PRESET_COUNT, count);
-
-    // Send each existing preset ID and name
-    for (uint8_t i = Config::MIN_PRESET_ID; i <= Config::MAX_PRESET_ID; i++) {
-      if (prefs.isKey(String(i).c_str())) {
-        Preset preset = {};
-        prefs.getBytes(String(i).c_str(), &preset, sizeof(Preset));
-        LOG(LOG_DEBUG, "Found preset ID %d: '%s'", i, preset.name);
-        sendFrame(CMD_ACK, Config::ProtocolID::PRESET_EXISTS, i);
-        for (uint8_t c = 0; c < 8; c++) {
-          FloatBytes fbName;
-          memcpy(fbName.b, &preset.name[c*4], 4);
-          sendFrame(CMD_ACK, Config::ProtocolID::PRESET_NAME_CHUNK, fbName.f);
-        }
-      }
-    }
-
-    LOG(LOG_DEBUG, "Preset list complete");
-    sendFrame(CMD_ACK, Config::ProtocolID::LIST_END, 0);
-
-    prefs.end();
-    return;
-  }
-  else if (cmd == CMD_DELETE_PRESET) {
-    uint8_t presetId = constrain((uint8_t)fb.f, Config::MIN_PRESET_ID, Config::MAX_PRESET_ID);
-    deletePresetFromNVS(presetId);
-    sendFrame(CMD_ACK, Config::ProtocolID::PRESET_DELETE_ACK, presetId);
-    return;
-  }
-  else if (cmd == CMD_SAVE_PRESET_WITH_DATA) {
-    // This command will be followed by individual field updates
-    uint8_t presetId = constrain((uint8_t)fb.f, Config::MIN_PRESET_ID, Config::MAX_PRESET_ID);
-    
-    // Store the preset ID for the upcoming data
-    currentPresetId = presetId;
-    currentPresetData = {}; // Reset struct
-    memset(currentPresetData.name, 0, sizeof(currentPresetData.name));
-    
-    // Copy current MCU values
-    currentPresetData.riseTime = riseTime;
-    currentPresetData.fallTime = fallTime;
-    currentPresetData.stayHigh = stayHigh;
-    currentPresetData.stayLow = stayLow;
-    currentPresetData.minAngle = minAngle;
-    currentPresetData.maxAngle = maxAngle;
-    currentPresetData.speedStepsPerSec = speedStepsPerSec;
-    currentPresetData.servoPwmMin = (float)servoPwmMin;
-    currentPresetData.servoPwmMax = (float)servoPwmMax;
-    currentPresetData.runYoke = yokeRunning ? 1 : 0;
-    currentPresetData.runConveyor = conveyorRunning ? 1 : 0;
-
-    sendFrame(CMD_ACK, Config::ProtocolID::PRESET_READY, presetId);
-    return;
-  }
-  else if (cmd == CMD_SAVE_PRESET_FIELD) {
-    // Save individual field to current preset data
-    uint8_t fieldId = id;
-    float value = fb.f;
-
-    switch(fieldId) {
-      case 0x20: currentPresetData.feedRate = value; break;
-      case 0x21: currentPresetData.loopHeightInput = value; break;
-      case 0x22: currentPresetData.loopLength = value; break;
-      case 0x23: currentPresetData.retractLength = value; break;
-      case 0x24: currentPresetData.degSec = value; break;
-      case 0x25: currentPresetData.yokeLength = value; break;
-      case 0x26: currentPresetData.muSteps = value; break;
-      case 0x27: currentPresetData.degStep = value; break;
-      case 0x28: currentPresetData.driveDiameter = value; break;
-      case 0x29: currentPresetData.minAngleRaw = value; break;
-      case 0x2A: currentPresetData.servoPwmMinUser = value; break;
-      case 0x2B: currentPresetData.servoPwmMaxUser = value; break;
-      case 0x30: memcpy(&currentPresetData.name[0], fb.b, 4); break;
-      case 0x31: memcpy(&currentPresetData.name[4], fb.b, 4); break;
-      case 0x32: memcpy(&currentPresetData.name[8], fb.b, 4); break;
-      case 0x33: memcpy(&currentPresetData.name[12], fb.b, 4); break;
-      case 0x34: memcpy(&currentPresetData.name[16], fb.b, 4); break;
-      case 0x35: memcpy(&currentPresetData.name[20], fb.b, 4); break;
-      case 0x36: memcpy(&currentPresetData.name[24], fb.b, 4); break;
-      case 0x37: memcpy(&currentPresetData.name[28], fb.b, 4); break;
-    }
-
-    sendFrame(CMD_ACK, Config::ProtocolID::FIELD_ACK, fieldId);
-    return;
-  }
-  else if (cmd == CMD_SAVE_PRESET_COMPLETE) {
-    // Finalize the preset save
-    uint8_t presetId = constrain((uint8_t)fb.f, Config::MIN_PRESET_ID, Config::MAX_PRESET_ID);
-    savePresetToNVSWithData(presetId, currentPresetData);
-    sendFrame(CMD_ACK, Config::ProtocolID::PRESET_SAVE_ACK, presetId);
-    return;
   }
 
-  // Handle regular commands
-  if (cmd == CMD_SET || cmd == CMD_TOGGLE) {
-    applyParam(id, fb.f);
-    sendFrame(CMD_ACK, id, readParam(id));
-  }
-  else if (cmd == CMD_GET) {
-    if (id == 0x00) {
-      for (uint8_t pid = ParamID_RISE_TIME_MS; pid <= ParamID_RUN_CONVEYOR; ++pid)
-        sendFrame(CMD_ACK, pid, readParam(pid));
-    } else {
-      sendFrame(CMD_ACK, id, readParam(id));
-    }
-  }
+  // Unknown command
+  LOG(LOG_WARN, "Unknown command: 0x%02X", cmd);
 }
 
 /* =====================  SERIAL PARSER  (unchanged) ============== */
