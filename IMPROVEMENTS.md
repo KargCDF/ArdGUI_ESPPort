@@ -118,11 +118,23 @@ This document tracks the implementation of improvements identified in the code r
   - Result: Cleaner architecture, easier to add new commands
   - Completed: 2025-10-31
 
+### ✅ Completed
+
+- [x] **Task 3.2**: Split HTML into modules (4 hours)
+  - Files: `data/index.html`, `data/js/websocket-client.js`, `data/js/preset-manager.js`, `data/js/ui-controller.js`
+  - Created 3 focused JavaScript modules:
+    - **websocket-client.js** (108 lines): WebSocket connection, frame sending/receiving, protocol handling
+    - **preset-manager.js** (351 lines): Preset save/load/delete, ESP32 synchronization, dropdown management
+    - **ui-controller.js** (220 lines): UI initialization, event handlers, form bindings, debounced sending
+  - Reduced index.html from 693 lines to 278 lines (60% reduction)
+  - Improved separation of concerns and code organization
+  - Each module has clear responsibilities and exports
+  - Result: More maintainable, testable, and extensible web UI
+  - Completed: 2025-10-31
+
 ### 📋 Planned
 
-- [ ] **Task 3.2**: Split HTML into modules (4 hours)
-  - Create separate JS files
-  - Status: Pending
+None remaining in Phase 3
 
 ---
 
@@ -215,3 +227,4 @@ pio test
 - **2025-10-31**: Completed Task 3.3 (Debounce WebSocket cleanup)
 - **2025-10-31**: Completed Task 3.4 (Optimize preset scanning)
 - **2025-10-31**: Completed Task 3.1 (Refactor command handling with dispatch table)
+- **2025-10-31**: Completed Task 3.2 (Split HTML into JavaScript modules)

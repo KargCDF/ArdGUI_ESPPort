@@ -127,564 +127,149 @@
   <!-- ─── Main UI logic ─────────────────────────────────────── -->
 
   <script type="module">
-import { ParameterModel, NameToID, IDToName } from "./js/ParameterModel.js";
-import { buildFrame, parseFrame, CMD } from "./js/proto.js";
+// Import modules
+import { ParameterModel } from "./js/ParameterModel.js";
+import { initWebSocket } from "./js/websocket-client.js";
+import { initUI, setupInputHandlers, setupCheckboxHandlers, setupButtonHandlers } from "./js/ui-controller.js";
+import {
+  initPresetManager, createFullPreset, applyFullPreset,
+  saveFullPresetToESP32, loadPresetFromESP32, loadESP32PresetList,
+  deletePreset, setupDeleteHandler, getNextPresetId, incrementNextPresetId,
+  addPresetToUI, getPresetCount
+} from "./js/preset-manager.js";
 
 window.addEventListener("DOMContentLoaded", async () => {
   /* ────────────────────────────────────────────────────────────
-     1. GET ALL ELEMENT REFERENCES FIRST
+     1. GET ALL ELEMENT REFERENCES
      ──────────────────────────────────────────────────────────── */
-  const logBox = document.getElementById("log");
-  const dd = document.getElementById("preset-dd");
-  const runAll = document.getElementById("runAll");
-  const runYoke = document.getElementById("runYoke");
-  const runConveyor = document.getElementById("runConveyor");
-  
-  // ADD THESE MISSING REFERENCES:
-  const out_loopHeight = document.getElementById("out_loopHeight");
-  const out_holdHigh = document.getElementById("out_holdHigh");
-  const out_holdLow = document.getElementById("out_holdLow");
-  const out_stepsSec = document.getElementById("out_stepsSec");
-  const out_minTime = document.getElementById("out_minTime");
-  const out_maxAngle = document.getElementById("out_maxAngle");
+  const domElements = {
+    logBox: document.getElementById("log"),
+    dropdown: document.getElementById("preset-dd"),
+    runAll: document.getElementById("runAll"),
+    runYoke: document.getElementById("runYoke"),
+    runConveyor: document.getElementById("runConveyor"),
+    out_loopHeight: document.getElementById("out_loopHeight"),
+    out_holdHigh: document.getElementById("out_holdHigh"),
+    out_holdLow: document.getElementById("out_holdLow"),
+    out_stepsSec: document.getElementById("out_stepsSec"),
+    out_minTime: document.getElementById("out_minTime"),
+    out_maxAngle: document.getElementById("out_maxAngle")
+  };
 
   /* ────────────────────────────────────────────────────────────
-     2. Model setup
+     2. MODEL AND MODULE INITIALIZATION
      ──────────────────────────────────────────────────────────── */
   const model = new ParameterModel();
 
   /* ────────────────────────────────────────────────────────────
-     3. KEEP YOUR FUNCTIONS - JUST DEFINE THEM EARLY
+     3. INITIALIZE MODULES
      ──────────────────────────────────────────────────────────── */
-  function bindModelToForm(m) {
-    Object.entries(m.toJSON()).forEach(([k, v]) => {
-      const ip = document.querySelector(`input[name="${k}"]`);
-      if (!ip) return;
-      if (ip.type === "checkbox") ip.checked = !!v;
-      else ip.value = v;
-    });
-    runYoke.checked = !!m.runYoke;
-    runConveyor.checked = !!m.runConveyor;
-    updateRunAllState(); // Use the proper function instead of direct assignment
-    updateDerived(m);
-  }
-  
-  function updateDerived(m) {
-    out_loopHeight.textContent = m.loopHeight.toFixed(2);
-    out_holdHigh.textContent = m.holdHighCalc.toFixed(3);
-    out_holdLow.textContent = m.holdLowCalc.toFixed(3);
-    out_stepsSec.textContent = m.stepsSecCalc.toFixed(2);
-    out_minTime.textContent = m.minTime.toFixed(4);
-    out_maxAngle.textContent = m.maxAngle.toFixed(2);
-  }
+  // Initialize UI controller
+  const uiControls = initUI(model, domElements);
+  const { log, setDisabled, updateRunAllState, updateDerived } = uiControls;
 
-  function updateRunAllState() {
-    const yokeRunning = runYoke.checked;
-    const conveyorRunning = runConveyor.checked;
-    
-    if (yokeRunning && conveyorRunning) {
-      runAll.checked = true;
-      runAll.indeterminate = false;
-    } else if (!yokeRunning && !conveyorRunning) {
-      runAll.checked = false;
-      runAll.indeterminate = false;
-    } else {
-      runAll.checked = false;
-      runAll.indeterminate = true;
-    }
-  }
+  // Initialize preset manager
+  initPresetManager(log);
 
-  function log(line) {
-    logBox.value += line + "\n";
-    logBox.scrollTop = logBox.scrollHeight;
-  }
-
-  function setDisabled(state) {
-    document.querySelectorAll("input,button").forEach(el => el.disabled = state);
-  }
+  // Setup event handlers
+  setupInputHandlers(model, uiControls);
+  setupCheckboxHandlers(domElements, uiControls);
+  setupButtonHandlers(model, uiControls);
 
   /* ────────────────────────────────────────────────────────────
-     4. WebSocket and communication setup
+     4. WEBSOCKET INITIALIZATION
      ──────────────────────────────────────────────────────────── */
-  const ws = new WebSocket(`ws://${location.host}/ws`);
-  ws.binaryType = "arraybuffer";
-  const pendingDict = {};
-  
-  let sendTimeout = null;
-  const DEBOUNCE_DELAY = 300;
-
-  const ParamNames = {
-    0x01: "Rise Time", 0x02: "Fall Time", 0x03: "Hold High", 0x04: "Hold Low",
-    0x05: "Min Angle", 0x06: "Max Angle", 0x07: "Steps/Sec",
-    0x08: "Servo PWM Min", 0x09: "Servo PWM Max", 0x10: "Run Yoke", 0x11: "Run Conveyor"
-  };
-  
-  function sendFrame(cmd, id, val = 0) {
-    ws.send(buildFrame(cmd, id, val));
-    const paramName = ParamNames[id] || `0x${id.toString(16).padStart(2,"0")}`;
-    log(`→ ${paramName}: ${val}`);
-  }
-
-  function scheduleSend() {
-    if (sendTimeout) clearTimeout(sendTimeout);
-    sendTimeout = setTimeout(() => {
-      flushPending();
-      sendTimeout = null;
-    }, DEBOUNCE_DELAY);
-  }
-
-  function flushPending() {
-    for (const [idStr, v] of Object.entries(pendingDict)) {
-      const id = Number(idStr);
-      sendFrame(CMD.SET, id, v);
-    }
-    Object.keys(pendingDict).forEach(k => delete pendingDict[k]);
-  }
-  
-  function queueToggle(id, val) {
-    sendFrame(CMD.TOGGLE, id, val ? 1 : 0);
-  }
-
-  function updateDerivedMCUParams() {
-    const derivedUpdates = {
-      [NameToID.holdHighRaw]: model.holdHighCalc,
-      [NameToID.holdLowRaw]: model.holdLowCalc,
-      [NameToID.stepsPerSecondRaw]: model.stepsSecCalc,
-      [NameToID.maxAngleRaw]: model.maxAngle
-    };
-    
-    Object.assign(pendingDict, derivedUpdates);
-    scheduleSend();
-    
-    model.holdHighRaw = model.holdHighCalc;
-    model.holdLowRaw = model.holdLowCalc;
-    model.stepsPerSecondRaw = model.stepsSecCalc;
-    model.maxAngleRaw = model.maxAngle;
-  }
-
-  /* ────────────────────────────────────────────────────────────
-     5. Initialize UI
-     ──────────────────────────────────────────────────────────── */
-  bindModelToForm(model);
-
-  model.addEventListener("preset", () => bindModelToForm(model));
-  model.addEventListener("change", (e) => {
-    updateDerived(model);
-    
-    if (['minAngleRaw', 'maxAngleRaw', 'degSec', 'yokeLength', 'loopHeightInput'].includes(e.detail.field)) {
-      document.querySelector('input[name="riseTimeRaw"]').value = model.riseTimeRaw;
-      document.querySelector('input[name="fallTimeRaw"]').value = model.fallTimeRaw;
-    }
-  });
-
-  /* ────────────────────────────────────────────────────────────
-     6. Input handlers
-     ──────────────────────────────────────────────────────────── */
-  document.querySelectorAll("input[type=number]").forEach(ip => {
-    ip.addEventListener("input", () => {
-      updateDerived(model);
-    });
-    
-    ip.addEventListener("change", () => {
-      const newValue = Number(ip.value);
-      if (isNaN(newValue)) return;
-      
-      model.update(ip.name, newValue);
-      ip.value = model[ip.name];
-      
-      if (NameToID[ip.name]) {
-        pendingDict[NameToID[ip.name]] = model[ip.name];
-        scheduleSend();
-      } else if (['feedRate', 'loopHeightInput', 'loopLength', 'retractLength', 'degSec', 'yokeLength', 'muSteps', 'degStep', 'driveDiameter'].includes(ip.name)) {
-        updateDerivedMCUParams();
+  initWebSocket(null, {
+    onOpen: async () => {
+      setDisabled(false);
+      domElements.dropdown.innerHTML = "";
+      try {
+        await loadESP32PresetList(domElements.dropdown);
+        log(`✓ Loaded ${getPresetCount()} presets from ESP32`);
+      } catch (error) {
+        log(`✗ Failed to load ESP32 presets: ${error.message}`);
       }
-    });
-  });
-
-  /* ────────────────────────────────────────────────────────────
-     7. Event handlers
-     ──────────────────────────────────────────────────────────── */
-  runYoke.addEventListener("change", e => {
-    queueToggle(NameToID.runYoke, e.target.checked);
-    updateRunAllState();
-  });
-  
-  runConveyor.addEventListener("change", e => {
-    queueToggle(NameToID.runConveyor, e.target.checked);
-    updateRunAllState();
-  });
-
-  runAll.addEventListener("change", e => {
-    const isRunning = e.target.checked;
-    runYoke.checked = isRunning;
-    runConveyor.checked = isRunning;
-    queueToggle(NameToID.runYoke, isRunning);
-    queueToggle(NameToID.runConveyor, isRunning);
-  });
-
-  /* ────────────────────────────────────────────────────────────
-     8. WebSocket handlers (SINGLE INSTANCE ONLY)
-     ──────────────────────────────────────────────────────────── */
-  ws.addEventListener("open", async () => {
-    log(`✓ Connected to ${ws.url}`);
-    setDisabled(false);
-
-    // Populate dropdown with presets from the ESP32 only
-    dd.innerHTML = "";
-    try {
-      await loadESP32PresetList();
-      const maxId = Math.max(0, ...Array.from(esp32Presets.keys()));
-      nextPresetId = maxId + 1;
-      log(`✓ Loaded ${esp32Presets.size} presets from ESP32`);
-    } catch (error) {
-      log(`✗ Failed to load ESP32 presets: ${error.message}`);
-    }
-  });
-
-  ws.addEventListener("message", ev => {
-    if (!(ev.data instanceof ArrayBuffer)) return;
-    const info = parseFrame(new Uint8Array(ev.data));
-    if (!info || info.cmd !== CMD.ACK) return;
-
-    const field = IDToName[info.id];
-    if (field) {
-      model.update(field, info.value);
-      if (field === "runYoke" || field === "runConveyor") {
-        updateRunAllState();
+    },
+    onMessage: (info) => {
+      // Update model from MCU responses
+      if (info.id >= 0x01 && info.id <= 0x11) {
+        const fieldMap = {
+          0x01: 'riseTimeRaw',
+          0x02: 'fallTimeRaw',
+          0x03: 'holdHighRaw',
+          0x04: 'holdLowRaw',
+          0x05: 'minAngleRaw',
+          0x06: 'maxAngleRaw',
+          0x07: 'stepsPerSecondRaw',
+          0x08: 'servoPwmMin',
+          0x09: 'servoPwmMax',
+          0x10: 'runYoke',
+          0x11: 'runConveyor'
+        };
+        const field = fieldMap[info.id];
+        if (field) {
+          model.update(field, info.value);
+          if (field === "runYoke" || field === "runConveyor") {
+            updateRunAllState();
+          }
+        }
       }
     }
-    
-    // Emit event for preset management
-    window.dispatchEvent(new CustomEvent('esp32-ack', {
-      detail: { id: info.id, value: info.value }
-    }));
-    
-    const paramName = ParamNames[info.id] || `0x${info.id.toString(16).padStart(2,"0")}`;
-    log(`← ACK ${paramName}: ${info.value}`);
-  });
+  }, log);
 
   /* ────────────────────────────────────────────────────────────
-     9. Button handlers
+     5. PRESET HANDLERS
      ──────────────────────────────────────────────────────────── */
-  document.getElementById("sendAll").addEventListener("click", () => {
-    const serialDict = model.toSerialDict();
-    for (const [id, v] of Object.entries(serialDict)) {
-      sendFrame(CMD.SET, Number(id), v);
-    }
-  });
-
-  document.getElementById("queryMcu").addEventListener("click", () =>
-    sendFrame(CMD.GET, 0x00, 0));
-
-  document.getElementById("clearLog").addEventListener("click", () => 
-    (logBox.value = ""));
-
-  document.getElementById("loadConfig").addEventListener("click", () => {
-    sendFrame(CMD.LOAD_NVS, 0, 0);
-    log("→ LOAD_NVS");
-  });
-
-  /* ────────────────────────────────────────────────────────────
-     10. Preset management (SINGLE DROPDOWN HANDLER)
-     ──────────────────────────────────────────────────────────── */
-  let nextPresetId = 1;
-  let esp32Presets = new Map();
-
-  // Enhanced savePreset handler - sends ALL browser fields directly to ESP32
+  // Save preset button
   document.getElementById("savePreset").addEventListener("click", async () => {
     const name = prompt("Preset name:");
     if (!name) return;
 
     try {
-      const fullPreset = createFullPreset();
+      const presetId = getNextPresetId();
+      const fullPreset = createFullPreset(domElements);
 
-      await saveFullPresetToESP32(nextPresetId, name, fullPreset);
-      esp32Presets.set(nextPresetId, name);
-      
-      // Add to dropdown
-      const opt = document.createElement("option");
-      opt.value = opt.textContent = name;
-      opt.dataset.presetId = nextPresetId;
-      opt.dataset.presetName = name;
-      dd.appendChild(opt);
+      await saveFullPresetToESP32(presetId, name, fullPreset);
+      addPresetToUI(presetId, name, domElements.dropdown);
+      incrementNextPresetId();
 
-      nextPresetId++;
-      log(`✓ Saved preset "${name}" (ID: ${nextPresetId-1}) with all fields to ESP32 NVS`);
+      log(`✓ Saved preset "${name}" (ID: ${presetId}) with all fields to ESP32 NVS`);
     } catch (error) {
       log(`✗ Failed to save preset: ${error.message}`);
     }
   });
 
+  // Delete preset button
   document.getElementById("deletePreset").addEventListener("click", () => {
-    const opt = dd.options[dd.selectedIndex];
+    const opt = domElements.dropdown.options[domElements.dropdown.selectedIndex];
     const id = opt.dataset.presetId;
     if (!id) return;
-    sendFrame(CMD.DELETE_PRESET, 0, Number(id));
+    deletePreset(Number(id));
   });
 
-  // Enhanced createFullPreset - gets ALL user-editable fields
-  function createFullPreset() {
-    const preset = {};
-    
-    // Get all input field values
-    document.querySelectorAll("input[type=number]").forEach(input => {
-      preset[input.name] = parseFloat(input.value) || 0;
-    });
-    
-    // Get checkbox values
-    preset.runYoke = runYoke.checked;
-    preset.runConveyor = runConveyor.checked;
-    
-    return preset;
-  }
-
-  // Apply a full preset object to the model and UI, then send it
-  function applyFullPreset(data) {
-    for (const [field, value] of Object.entries(data)) {
-      if (field in model) {
-        model.update(field, Number(value));
-      }
-      const ip = document.querySelector(`input[name="${field}"]`);
-      if (ip) {
-        if (ip.type === "checkbox") ip.checked = !!value;
-        else ip.value = value;
-      }
-    }
-
-    runYoke.checked = !!model.runYoke;
-    runConveyor.checked = !!model.runConveyor;
-    updateRunAllState();
-    updateDerived(model);
-
-    const serialDict = model.toSerialDict();
-    for (const [id, v] of Object.entries(serialDict)) {
-      sendFrame(CMD.SET, Number(id), v);
-    }
-  }
-
-  // Enhanced save function that sends all browser fields to ESP32
-  async function saveFullPresetToESP32(presetId, presetName, presetData) {
-    return new Promise(async (resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error("Timeout waiting for ESP32 preset save"));
-      }, 10000);
-
-      let fieldsToSend = 0;
-      let fieldsReceived = 0;
-
-      const handleSaveAck = (event) => {
-        const { id, value } = event.detail;
-        
-        if (id === 0xF9 && value === presetId) {
-          // ESP32 ready to receive field data
-          sendAllFieldsToESP32(presetData, presetName);
-          return;
-        }
-        
-        if (id === 0xFA) {
-          // Field received confirmation
-          fieldsReceived++;
-          if (fieldsReceived >= fieldsToSend) {
-            // All fields sent, complete the save
-            sendFrame(CMD.SAVE_PRESET_COMPLETE, 0x00, presetId);
-          }
-          return;
-        }
-        
-        if (id === 0xF1 && value === presetId) {
-          // Save complete
-          clearTimeout(timeout);
-          window.removeEventListener('esp32-ack', handleSaveAck);
-          resolve();
-        }
-      };
-
-      const sendAllFieldsToESP32 = (data, name) => {
-        const fieldMap = {
-          feedRate: 0x20,
-          loopHeightInput: 0x21,
-          loopLength: 0x22,
-          retractLength: 0x23,
-          degSec: 0x24,
-          yokeLength: 0x25,
-          muSteps: 0x26,
-          degStep: 0x27,
-          driveDiameter: 0x28,
-          minAngleRaw: 0x29,
-          servoPwmMin: 0x2A,
-          servoPwmMax: 0x2B
-        };
-        const nameChunks = 8;
-        fieldsToSend = Object.keys(fieldMap).length + nameChunks;
-
-        // Send each field
-        Object.entries(fieldMap).forEach(([fieldName, fieldId]) => {
-          const value = data[fieldName] || 0;
-          sendFrame(CMD.SAVE_PRESET_FIELD, fieldId, value);
-        });
-
-        const enc = new TextEncoder();
-        const bytes = new Uint8Array(32);
-        bytes.fill(0);
-        const encBytes = enc.encode(name);
-        bytes.set(encBytes.slice(0, 32));
-        for (let i = 0; i < nameChunks; i++) {
-          const dv = new DataView(bytes.buffer, i * 4, 4);
-          const floatVal = dv.getFloat32(0, true);
-          sendFrame(CMD.SAVE_PRESET_FIELD, 0x30 + i, floatVal);
-        }
-      };
-
-      window.addEventListener('esp32-ack', handleSaveAck);
-      
-      // Start the save process
-      sendFrame(CMD.SAVE_PRESET_WITH_DATA, 0x00, presetId);
-    });
-  }
-
-  // Enhanced load function that restores ALL fields
-  async function loadPresetFromESP32(presetId) {
-    return new Promise((resolve, reject) => {
-      let receivedData = {};
-      
-      const timeout = setTimeout(() => {
-        reject(new Error("Timeout waiting for ESP32 preset load"));
-      }, 5000);
-
-      const handleLoadAck = (event) => {
-        const { id, value } = event.detail;
-        
-        if (id === 0xF2 && value === presetId) {
-          // Load complete
-          clearTimeout(timeout);
-          window.removeEventListener('esp32-ack', handleLoadAck);
-          
-          // Apply ALL received data
-          applyFullPreset(receivedData);
-          resolve();
-          return;
-        }
-        
-        // Map received field IDs back to field names
-        const fieldMap = {
-          0x20: 'feedRate',
-          0x21: 'loopHeightInput',
-          0x22: 'loopLength',
-          0x23: 'retractLength',
-          0x24: 'degSec',
-          0x25: 'yokeLength',
-          0x26: 'muSteps',
-          0x27: 'degStep',
-          0x28: 'driveDiameter',
-          0x29: 'minAngleRaw',
-          0x2A: 'servoPwmMin',
-          0x2B: 'servoPwmMax'
-        };
-        
-        if (fieldMap[id]) {
-          receivedData[fieldMap[id]] = value;
-        }
-        
-        // Also handle MCU parameters
-        const mcuField = IDToName[id];
-        if (mcuField) {
-          receivedData[mcuField] = value;
-        }
-      };
-
-      window.addEventListener('esp32-ack', handleLoadAck);
-      sendFrame(CMD.LOAD_PRESET, 0x00, presetId);
-    });
-  }
-
-  // SINGLE dropdown handler - remove the duplicate one
-  dd.addEventListener("change", async () => {
-    const selectedOption = dd.options[dd.selectedIndex];
+  // Preset dropdown change handler
+  domElements.dropdown.addEventListener("change", async () => {
+    const selectedOption = domElements.dropdown.options[domElements.dropdown.selectedIndex];
     const presetId = selectedOption.dataset.presetId;
 
     if (presetId) {
       try {
-        await loadPresetFromESP32(parseInt(presetId));
-        log(`✓ Loaded "${dd.value}" (ID: ${presetId}) from ESP32 NVS`);
+        await loadPresetFromESP32(
+          parseInt(presetId),
+          model,
+          (data) => applyFullPreset(data, model, { updateRunAllState, updateDerived })
+        );
+        log(`✓ Loaded "${domElements.dropdown.value}" (ID: ${presetId}) from ESP32 NVS`);
       } catch (error) {
         log(`✗ Failed to load preset from ESP32: ${error.message}`);
       }
     }
   });
 
-  // Remove preset from UI/map when delete ACK received
-  window.addEventListener('esp32-ack', ev => {
-    const { id, value } = ev.detail;
-    if (id === 0xF4) {
-      esp32Presets.delete(value);
-      const opt = dd.querySelector(`option[data-preset-id="${value}"]`);
-      if (opt) opt.remove();
-    }
-  });
+  // Setup delete handler
+  setupDeleteHandler(domElements.dropdown);
 
-  // Enhanced function to load ESP32 presets
-  async function loadESP32PresetList() {
-    return new Promise((resolve, reject) => {
-      esp32Presets.clear();
-      
-      const timeout = setTimeout(() => {
-        reject(new Error("Timeout waiting for ESP32 preset list"));
-      }, 5000);
-
-      let pendingId = null;
-      let nameBytes = [];
-
-      const handlePresetListAck = (event) => {
-        const { id, value } = event.detail;
-        
-        if (id === 0xF3) { // PRESET_COUNT
-          // Count received - preset IDs will follow
-          return;
-        }
-        else if (id === 0xF5) { // PRESET_EXISTS
-          pendingId = value;
-          nameBytes = [];
-        }
-        else if (id === 0xF6 && pendingId !== null) {
-          const dv = new DataView(new ArrayBuffer(4));
-          dv.setFloat32(0, value, true);
-          for (let i = 0; i < 4; i++) nameBytes.push(dv.getUint8(i));
-          if (nameBytes.length >= 32) {
-            const dec = new TextDecoder();
-            const name = dec.decode(new Uint8Array(nameBytes)).replace(/\0.*$/, '') || `ESP32 Preset ${pendingId}`;
-            esp32Presets.set(pendingId, name);
-            const existingOption = dd.querySelector(`option[data-preset-id="${pendingId}"]`);
-            if (!existingOption) {
-              const opt = document.createElement("option");
-              opt.value = opt.textContent = name;
-              opt.dataset.presetId = pendingId;
-              opt.dataset.source = "esp32";
-              dd.appendChild(opt);
-            } else {
-              existingOption.textContent = name;
-              existingOption.value = name;
-            }
-            pendingId = null;
-            nameBytes = [];
-          }
-        }
-        else if (id === 0xF8) { // LIST_END
-          clearTimeout(timeout);
-          window.removeEventListener('esp32-ack', handlePresetListAck);
-
-          // Determine the next available preset ID
-          const ids = Array.from(esp32Presets.keys());
-          nextPresetId = ids.length > 0 ? Math.max(...ids) + 1 : 1;
-
-          resolve();
-        }
-      };
-
-      window.addEventListener('esp32-ack', handlePresetListAck);
-      sendFrame(CMD.LIST_PRESETS, 0x00, 0);
-    });
-  }
-
+  // Initial UI update
   updateDerived(model);
 });
 </script>
