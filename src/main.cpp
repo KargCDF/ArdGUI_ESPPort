@@ -746,34 +746,31 @@ void savePresetToNVS(uint8_t presetId) {
   };
 
   snprintf(preset.name, sizeof(preset.name), "Preset %u", presetId);
-  
+
+  // Check if preset already exists BEFORE writing (to track if it's new)
+  bool presetExisted = prefs.isKey(String(presetId).c_str());
+
   // Save binary preset data directly using preset ID as key
   size_t written = prefs.putBytes(String(presetId).c_str(), &preset, sizeof(Preset));
 
   // Verify it was saved
-  if (written == sizeof(Preset) && prefs.isKey(String(presetId).c_str())) {
-    LOG(LOG_DEBUG, "Preset %d saved successfully (%d bytes)", presetId, sizeof(Preset));
-  } else {
+  if (written != sizeof(Preset) || !prefs.isKey(String(presetId).c_str())) {
     LOG(LOG_ERROR, "Failed to save preset %d to NVS", presetId);
     prefs.end();
     return;
   }
-  
-  // Update preset count
-  uint8_t presetCount = prefs.getUChar("count", 0);
-  bool found = false;
-  for (uint8_t i = 1; i <= presetCount; i++) {
-    if (prefs.isKey(String(i).c_str())) {
-      if (i == presetId) {
-        found = true;
-        break;
-      }
+
+  LOG(LOG_DEBUG, "Preset %d saved successfully (%d bytes)", presetId, sizeof(Preset));
+
+  // Update count only if this is a NEW preset (didn't exist before)
+  if (!presetExisted) {
+    uint8_t currentCount = prefs.getUChar("count", 0);
+    if (currentCount < Config::MAX_PRESET_ID) {
+      prefs.putUChar("count", currentCount + 1);
+      LOG(LOG_DEBUG, "Incremented preset count to %d", currentCount + 1);
     }
   }
-  if (!found && presetCount < Config::MAX_PRESET_ID) {
-    prefs.putUChar("count", presetCount + 1);
-  }
-  
+
   prefs.end();
 }
 
@@ -859,15 +856,26 @@ void deletePresetFromNVS(uint8_t presetId) {
     return;
   }
 
+  // Check if preset exists BEFORE deleting (to know if we should decrement count)
+  bool presetExisted = prefs.isKey(String(presetId).c_str());
+
+  if (!presetExisted) {
+    LOG(LOG_WARN, "Preset %d does not exist, nothing to delete", presetId);
+    prefs.end();
+    return;
+  }
+
   LOG(LOG_INFO, "Deleting preset ID %d", presetId);
   prefs.remove(String(presetId).c_str());
 
-  // Update count
-  uint8_t activeCount = scanActivePresetCount();
-  prefs.putUChar("count", activeCount);
-  prefs.end();
+  // Decrement count since preset existed
+  uint8_t currentCount = prefs.getUChar("count", 0);
+  if (currentCount > 0) {
+    prefs.putUChar("count", currentCount - 1);
+    LOG(LOG_INFO, "Preset %d deleted, %d presets remaining", presetId, currentCount - 1);
+  }
 
-  LOG(LOG_INFO, "Preset %d deleted, %d presets remaining", presetId, activeCount);
+  prefs.end();
 }
 
 /* =====================  ISR  ================================== */
@@ -932,30 +940,45 @@ void loop()
 
 
 void savePresetToNVSWithData(uint8_t presetId, const Preset& presetData) {
-  if (presetId < Config::MIN_PRESET_ID || presetId > Config::MAX_PRESET_ID) return;
+  if (presetId < Config::MIN_PRESET_ID || presetId > Config::MAX_PRESET_ID) {
+    LOG(LOG_ERROR, "Invalid preset ID: %d (must be %d-%d)",
+        presetId, Config::MIN_PRESET_ID, Config::MAX_PRESET_ID);
+    return;
+  }
 
-  prefs.begin("presets", false);
+  if (!prefs.begin("presets", false)) {
+    LOG(LOG_ERROR, "Failed to open NVS namespace 'presets' for writing");
+    return;
+  }
+
+  LOG(LOG_INFO, "Saving full preset ID %d to NVS", presetId);
+
+  // Check if preset already exists BEFORE writing
+  bool presetExisted = prefs.isKey(String(presetId).c_str());
 
   // Save the complete preset data
   Preset tmp = presetData;
   if (tmp.name[0] == '\0')
     snprintf(tmp.name, sizeof(tmp.name), "Preset %u", presetId);
-  prefs.putBytes(String(presetId).c_str(), &tmp, sizeof(Preset));
-  Serial.printf("[DEBUG] Saved full preset ID %d, size: %d bytes\n", presetId, sizeof(Preset));
-  
-  // Update preset count
-  uint8_t presetCount = prefs.getUChar("count", 0);
-  bool found = false;
-  for (uint8_t i = 1; i <= presetCount; i++) {
-    if (prefs.isKey(String(i).c_str())) {
-      if (i == presetId) {
-        found = true;
-        break;
-      }
-    }
+
+  size_t written = prefs.putBytes(String(presetId).c_str(), &tmp, sizeof(Preset));
+
+  // Verify save
+  if (written != sizeof(Preset)) {
+    LOG(LOG_ERROR, "Failed to save full preset %d to NVS", presetId);
+    prefs.end();
+    return;
   }
-  if (!found && presetCount < Config::MAX_PRESET_ID) {
-    prefs.putUChar("count", presetCount + 1);
+
+  LOG(LOG_DEBUG, "Full preset %d saved successfully (%d bytes)", presetId, sizeof(Preset));
+
+  // Update count only if this is a NEW preset
+  if (!presetExisted) {
+    uint8_t currentCount = prefs.getUChar("count", 0);
+    if (currentCount < Config::MAX_PRESET_ID) {
+      prefs.putUChar("count", currentCount + 1);
+      LOG(LOG_DEBUG, "Incremented preset count to %d", currentCount + 1);
+    }
   }
 
   prefs.end();

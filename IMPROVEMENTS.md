@@ -85,6 +85,26 @@ This document tracks the implementation of improvements identified in the code r
 
 ## Phase 3: Medium Priority Improvements 🔧
 
+### ✅ Completed
+
+- [x] **Task 3.3**: Debounce WebSocket cleanup (30 min)
+  - File: `src/WebBridge.cpp:77-88`
+  - Added static timer to throttle cleanup to every 100ms
+  - Prevents calling `ws.cleanupClients()` on every loop iteration
+  - Result: Reduced CPU usage, no functional impact
+  - Completed: 2025-10-31
+
+- [x] **Task 3.4**: Optimize preset scanning (1 hour)
+  - Files: `src/main.cpp` - `savePresetToNVS()`, `deletePresetFromNVS()`, `savePresetToNVSWithData()`
+  - Eliminated `scanActivePresetCount()` loop in save/delete operations
+  - Now tracks count incrementally:
+    - Save: Check if preset exists before writing, increment if new
+    - Delete: Check if preset exists before deleting, decrement if found
+  - Removed loop that scanned all 100 preset slots on every delete
+  - Added proper error checking and logging to both functions
+  - Result: O(1) instead of O(n) for preset count updates
+  - Completed: 2025-10-31
+
 ### 📋 Planned
 
 - [ ] **Task 3.1**: Refactor command handling (3 hours)
@@ -93,14 +113,6 @@ This document tracks the implementation of improvements identified in the code r
 
 - [ ] **Task 3.2**: Split HTML into modules (4 hours)
   - Create separate JS files
-  - Status: Pending
-
-- [ ] **Task 3.3**: Debounce WebSocket cleanup (30 min)
-  - Optimize `WebBridge_loop()`
-  - Status: Pending
-
-- [ ] **Task 3.4**: Optimize preset scanning (1 hour)
-  - Maintain count incrementally
   - Status: Pending
 
 ---
@@ -191,3 +203,5 @@ pio test
 - **2025-10-31**: Completed Task 2.2 (Extract magic numbers - C++ side)
 - **2025-10-31**: Completed Task 2.1 (Add comprehensive error logging)
 - **2025-10-31**: Completed Task 2.3 (Eliminate code duplication)
+- **2025-10-31**: Completed Task 3.3 (Debounce WebSocket cleanup)
+- **2025-10-31**: Completed Task 3.4 (Optimize preset scanning)

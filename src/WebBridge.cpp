@@ -74,9 +74,16 @@ void WebBridge_begin()
     Serial.println("[WEB] HTTP + WS started");
 }
 
-void WebBridge_loop()          
-{ 
-    ws.cleanupClients(); 
+void WebBridge_loop()
+{
+    static unsigned long lastCleanup = 0;
+    constexpr unsigned long CLEANUP_INTERVAL_MS = 100;  // Cleanup every 100ms
+
+    unsigned long now = millis();
+    if (now - lastCleanup >= CLEANUP_INTERVAL_MS) {
+        ws.cleanupClients();
+        lastCleanup = now;
+    }
     // ESP32 mDNS runs automatically - no update() needed
 }
 
