@@ -30,4 +30,3 @@ pio run -t upload
 pio run -t uploadfs
 ```
 After flashing, the board creates an open access point `ArdGUI_ESP32`. The web interface is available at `http://am.local` or via the IP address shown in the serial monitor.
->>>>>>> main

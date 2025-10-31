@@ -4,6 +4,7 @@
     ──────────────────────────────────────────────────────────────── */
 
 #include <Arduino.h>
+#include <atomic>
 #include <cstring>
 #include "WebBridge.h"          // Wi-Fi + WS bridge (Phase-1)
 #include <Preferences.h>
@@ -22,10 +23,44 @@ constexpr uint8_t DIR_PIN  = 26;   // TB6600 DIR-
 constexpr uint8_t EN_PIN   = 27;   // TB6600 EN-
 constexpr uint8_t ENDSTOP_PIN = 33;          // NC switch → GND
 
+/* =====================  CONFIGURATION CONSTANTS  ================ */
+namespace Config {
+  // Timing
+  constexpr unsigned long ENDSTOP_DEBOUNCE_US = 1000000UL;  // 1 second
+
+  // Preset limits
+  constexpr uint8_t MAX_PRESET_ID = 100;
+  constexpr uint8_t MIN_PRESET_ID = 1;
+
+  // Servo PWM range (microseconds)
+  constexpr int DEFAULT_PWM_MIN = 600;
+  constexpr int DEFAULT_PWM_MAX = 2400;
+  constexpr int PWM_ABS_MIN     = 100;
+  constexpr int PWM_ABS_MAX     = 3000;
+
+  // Legacy compatibility
+  constexpr size_t LEGACY_PRESET_SIZE = 86;  // Old preset format size
+
+  // Protocol special IDs
+  namespace ProtocolID {
+    constexpr uint8_t NVS_SAVE_ACK      = 0xF0;
+    constexpr uint8_t PRESET_SAVE_ACK   = 0xF1;
+    constexpr uint8_t PRESET_LOAD_END   = 0xF2;
+    constexpr uint8_t PRESET_COUNT      = 0xF3;
+    constexpr uint8_t PRESET_DELETE_ACK = 0xF4;
+    constexpr uint8_t PRESET_EXISTS     = 0xF5;
+    constexpr uint8_t PRESET_NAME_CHUNK = 0xF6;
+    constexpr uint8_t LIST_END          = 0xF8;
+    constexpr uint8_t PRESET_READY      = 0xF9;
+    constexpr uint8_t FIELD_ACK         = 0xFA;
+    constexpr uint8_t READY_ACK         = 0xFF;
+  }
+}
+
 /* —— debounce for ENDSTOP —— */
-constexpr unsigned long DEBOUNCE_US = 1000000UL; // 1 s
-volatile  unsigned long lastEndstopMicros = 0;
-volatile  bool          endstopEvent      = false;
+constexpr unsigned long DEBOUNCE_US = Config::ENDSTOP_DEBOUNCE_US;
+std::atomic<unsigned long> lastEndstopMicros{0};
+std::atomic<bool>          endstopEvent{false};
 
 /* =====================  RUN-TIME VARIABLES  ===================== */
 float riseTime   = 120.4873f, fallTime  = 120.4873f;
@@ -230,12 +265,12 @@ void applyParam(uint8_t id, float val)
       break;
 
     case ParamID_SERVO_PWM_MIN_US:
-      servoPwmMin = constrain((int)val, 100, 3000);
+      servoPwmMin = constrain((int)val, Config::PWM_ABS_MIN, Config::PWM_ABS_MAX);
       myServo.attach(PWM_PIN, servoPwmMin, servoPwmMax);
       break;
 
     case ParamID_SERVO_PWM_MAX_US:
-      servoPwmMax = constrain((int)val, 100, 3000);
+      servoPwmMax = constrain((int)val, Config::PWM_ABS_MIN, Config::PWM_ABS_MAX);
       myServo.attach(PWM_PIN, servoPwmMin, servoPwmMax);
       break;
   }
@@ -276,7 +311,7 @@ void processIncomingFrame(uint8_t *buf, size_t len)
 
   if (cmd == CMD_SAVE_NVS) {
       saveToNVS();
-      sendFrame(CMD_ACK, 0xF0, 1);
+      sendFrame(CMD_ACK, Config::ProtocolID::NVS_SAVE_ACK, 1);
       return;
   }
   else if (cmd == CMD_LOAD_NVS) {
@@ -286,15 +321,15 @@ void processIncomingFrame(uint8_t *buf, size_t len)
       return;
   }
   else if (cmd == CMD_SAVE_PRESET) {
-    uint8_t presetId = constrain((uint8_t)fb.f, 1, 100); // Safety check
+    uint8_t presetId = constrain((uint8_t)fb.f, Config::MIN_PRESET_ID, Config::MAX_PRESET_ID);
     savePresetToNVS(presetId);
-    sendFrame(CMD_ACK, 0xF1, presetId);
+    sendFrame(CMD_ACK, Config::ProtocolID::PRESET_SAVE_ACK, presetId);
     return;
   }
   else if (cmd == CMD_LOAD_PRESET) {
-    uint8_t presetId = constrain((uint8_t)fb.f, 1, 100); // Safety check
+    uint8_t presetId = constrain((uint8_t)fb.f, Config::MIN_PRESET_ID, Config::MAX_PRESET_ID);
     loadPresetFromNVS(presetId);
-    
+
     // Send all parameters back
     sendFrame(CMD_ACK, ParamID_RISE_TIME_MS, riseTime);
     sendFrame(CMD_ACK, ParamID_FALL_TIME_MS, fallTime);
@@ -307,47 +342,47 @@ void processIncomingFrame(uint8_t *buf, size_t len)
     sendFrame(CMD_ACK, ParamID_SERVO_PWM_MAX_US, servoPwmMax);
     sendFrame(CMD_ACK, ParamID_RUN_YOKE, yokeRunning ? 1.0f : 0.0f);
     sendFrame(CMD_ACK, ParamID_RUN_CONVEYOR, conveyorRunning ? 1.0f : 0.0f);
-    
-    sendFrame(CMD_ACK, 0xF2, presetId);  // End marker
+
+    sendFrame(CMD_ACK, Config::ProtocolID::PRESET_LOAD_END, presetId);
     return;
   }
   else if (cmd == CMD_LIST_PRESETS) {
     prefs.begin("presets", true);
     uint8_t count = prefs.getUChar("count", 0);
-    
+
     Serial.printf("[DEBUG] Sending preset count: %d\n", count);
-    sendFrame(CMD_ACK, 0xF3, count);
-    
+    sendFrame(CMD_ACK, Config::ProtocolID::PRESET_COUNT, count);
+
     // Send each existing preset ID and name
-    for (uint8_t i = 1; i <= 100; i++) {
+    for (uint8_t i = Config::MIN_PRESET_ID; i <= Config::MAX_PRESET_ID; i++) {
       if (prefs.isKey(String(i).c_str())) {
         Preset preset = {};
         prefs.getBytes(String(i).c_str(), &preset, sizeof(Preset));
         Serial.printf("[DEBUG] Found preset ID: %d name: %s\n", i, preset.name);
-        sendFrame(CMD_ACK, 0xF5, i);  // 0xF5 = PRESET_EXISTS
+        sendFrame(CMD_ACK, Config::ProtocolID::PRESET_EXISTS, i);
         for (uint8_t c = 0; c < 8; c++) {
           FloatBytes fbName;
           memcpy(fbName.b, &preset.name[c*4], 4);
-          sendFrame(CMD_ACK, 0xF6, fbName.f);  // send name chunk
+          sendFrame(CMD_ACK, Config::ProtocolID::PRESET_NAME_CHUNK, fbName.f);
         }
       }
     }
-    
+
     Serial.println("[DEBUG] Sending list end marker");
-    sendFrame(CMD_ACK, 0xF8, 0);  // 0xF8 = LIST_END
-    
+    sendFrame(CMD_ACK, Config::ProtocolID::LIST_END, 0);
+
     prefs.end();
     return;
   }
   else if (cmd == CMD_DELETE_PRESET) {
-    uint8_t presetId = constrain((uint8_t)fb.f, 1, 100); // Safety check
+    uint8_t presetId = constrain((uint8_t)fb.f, Config::MIN_PRESET_ID, Config::MAX_PRESET_ID);
     deletePresetFromNVS(presetId);
-    sendFrame(CMD_ACK, 0xF4, presetId);
+    sendFrame(CMD_ACK, Config::ProtocolID::PRESET_DELETE_ACK, presetId);
     return;
   }
   else if (cmd == CMD_SAVE_PRESET_WITH_DATA) {
     // This command will be followed by individual field updates
-    uint8_t presetId = constrain((uint8_t)fb.f, 1, 100);
+    uint8_t presetId = constrain((uint8_t)fb.f, Config::MIN_PRESET_ID, Config::MAX_PRESET_ID);
     
     // Store the preset ID for the upcoming data
     currentPresetId = presetId;
@@ -366,15 +401,15 @@ void processIncomingFrame(uint8_t *buf, size_t len)
     currentPresetData.servoPwmMax = (float)servoPwmMax;
     currentPresetData.runYoke = yokeRunning ? 1 : 0;
     currentPresetData.runConveyor = conveyorRunning ? 1 : 0;
-    
-    sendFrame(CMD_ACK, 0xF9, presetId); // Ready to receive data
+
+    sendFrame(CMD_ACK, Config::ProtocolID::PRESET_READY, presetId);
     return;
   }
   else if (cmd == CMD_SAVE_PRESET_FIELD) {
     // Save individual field to current preset data
     uint8_t fieldId = id;
     float value = fb.f;
-    
+
     switch(fieldId) {
       case 0x20: currentPresetData.feedRate = value; break;
       case 0x21: currentPresetData.loopHeightInput = value; break;
@@ -397,15 +432,15 @@ void processIncomingFrame(uint8_t *buf, size_t len)
       case 0x36: memcpy(&currentPresetData.name[24], fb.b, 4); break;
       case 0x37: memcpy(&currentPresetData.name[28], fb.b, 4); break;
     }
-    
-    sendFrame(CMD_ACK, 0xFA, fieldId); // Field received
+
+    sendFrame(CMD_ACK, Config::ProtocolID::FIELD_ACK, fieldId);
     return;
   }
   else if (cmd == CMD_SAVE_PRESET_COMPLETE) {
     // Finalize the preset save
-    uint8_t presetId = constrain((uint8_t)fb.f, 1, 100);
+    uint8_t presetId = constrain((uint8_t)fb.f, Config::MIN_PRESET_ID, Config::MAX_PRESET_ID);
     savePresetToNVSWithData(presetId, currentPresetData);
-    sendFrame(CMD_ACK, 0xF1, presetId); // Save complete
+    sendFrame(CMD_ACK, Config::ProtocolID::PRESET_SAVE_ACK, presetId);
     return;
   }
 
@@ -594,7 +629,7 @@ void updateServo()
 
 /* =====================  IMPROVED PRESET MANAGEMENT (PURE BINARY) ============= */
 void savePresetToNVS(uint8_t presetId) {
-  if (presetId == 0 || presetId > 100) return;
+  if (presetId < Config::MIN_PRESET_ID || presetId > Config::MAX_PRESET_ID) return;
   
   prefs.begin("presets", false);
   
@@ -635,7 +670,7 @@ void savePresetToNVS(uint8_t presetId) {
       }
     }
   }
-  if (!found && presetCount < 100) {  // Limit to 100 presets
+  if (!found && presetCount < Config::MAX_PRESET_ID) {
     prefs.putUChar("count", presetCount + 1);
   }
   
@@ -643,12 +678,12 @@ void savePresetToNVS(uint8_t presetId) {
 }
 
 void loadPresetFromNVS(uint8_t presetId) {
-  if (presetId == 0 || presetId > 100) return;
+  if (presetId < Config::MIN_PRESET_ID || presetId > Config::MAX_PRESET_ID) return;
   
   prefs.begin("presets", true);
   size_t dataSize = prefs.getBytesLength(String(presetId).c_str());
-  
-  if (dataSize == sizeof(Preset) || dataSize == 86) {
+
+  if (dataSize == sizeof(Preset) || dataSize == Config::LEGACY_PRESET_SIZE) {
     Preset preset = {};
     size_t bytesRead = prefs.getBytes(String(presetId).c_str(), &preset, min(dataSize, sizeof(Preset)));
     prefs.end();
@@ -662,8 +697,8 @@ void loadPresetFromNVS(uint8_t presetId) {
       minAngle = constrain(preset.minAngle, 0.0f, 180.0f);
       maxAngle = constrain(preset.maxAngle, 0.0f, 180.0f);
       speedStepsPerSec = constrain(preset.speedStepsPerSec, 1.0f, 10000.0f);
-      servoPwmMin = constrain((int)preset.servoPwmMin, 100, 3000);
-      servoPwmMax = constrain((int)preset.servoPwmMax, 100, 3000);
+      servoPwmMin = constrain((int)preset.servoPwmMin, Config::PWM_ABS_MIN, Config::PWM_ABS_MAX);
+      servoPwmMax = constrain((int)preset.servoPwmMax, Config::PWM_ABS_MIN, Config::PWM_ABS_MAX);
       yokeRunning = preset.runYoke != 0;
       conveyorRunning = preset.runConveyor != 0;
       
@@ -710,18 +745,18 @@ uint8_t getPresetCount() {
   prefs.begin("presets", true);
   uint8_t count = prefs.getUChar("count", 0);
   prefs.end();
-  return min(count, (uint8_t)100); // Cap at 100
+  return min(count, Config::MAX_PRESET_ID);
 }
 
 void deletePresetFromNVS(uint8_t presetId) {
-  if (presetId == 0 || presetId > 100) return; // Safety check
+  if (presetId < Config::MIN_PRESET_ID || presetId > Config::MAX_PRESET_ID) return;
   
   prefs.begin("presets", false);
   prefs.remove(String(presetId).c_str());
   
   // Update count (scan for remaining presets)
   uint8_t activeCount = 0;
-  for (uint8_t i = 1; i <= 100; i++) {
+  for (uint8_t i = Config::MIN_PRESET_ID; i <= Config::MAX_PRESET_ID; i++) {
     if (prefs.isKey(String(i).c_str())) {
       activeCount++;
     }
@@ -734,9 +769,11 @@ void deletePresetFromNVS(uint8_t presetId) {
 void IRAM_ATTR endstopISR()
 {
   unsigned long now = micros();
-  if (now - lastEndstopMicros >= DEBOUNCE_US) {
-    lastEndstopMicros = now;
-    endstopEvent = true;
+  unsigned long last = lastEndstopMicros.load(std::memory_order_relaxed);
+
+  if (now - last >= DEBOUNCE_US) {
+    lastEndstopMicros.store(now, std::memory_order_relaxed);
+    endstopEvent.store(true, std::memory_order_release);
   }
 }
 
@@ -762,7 +799,7 @@ void setup()
   attachInterrupt(digitalPinToInterrupt(ENDSTOP_PIN), endstopISR, RISING);
 
   WebBridge_begin();          // ★ bring up Wi-Fi + WS
-  sendFrame(CMD_ACK, 0xFF, 0.0f);   // “READY”
+  sendFrame(CMD_ACK, Config::ProtocolID::READY_ACK, 0.0f);
 }
 
 /* =====================  LOOP  ================================= */
@@ -772,10 +809,8 @@ void loop()
   updateServo();
   if (conveyorRunning) stepper.runSpeed();
 
-  if (endstopEvent) {
-    noInterrupts();
-    endstopEvent = false;
-    interrupts();
+  if (endstopEvent.load(std::memory_order_acquire)) {
+    endstopEvent.store(false, std::memory_order_relaxed);
 
     float newYokeState = yokeRunning ? 0.0f : 1.0f;
     applyParam(ParamID_RUN_YOKE, newYokeState);
@@ -792,7 +827,7 @@ void loop()
 
 
 void savePresetToNVSWithData(uint8_t presetId, const Preset& presetData) {
-  if (presetId == 0 || presetId > 100) return;
+  if (presetId < Config::MIN_PRESET_ID || presetId > Config::MAX_PRESET_ID) return;
 
   prefs.begin("presets", false);
 
@@ -814,9 +849,9 @@ void savePresetToNVSWithData(uint8_t presetId, const Preset& presetData) {
       }
     }
   }
-  if (!found && presetCount < 100) {
+  if (!found && presetCount < Config::MAX_PRESET_ID) {
     prefs.putUChar("count", presetCount + 1);
   }
-  
+
   prefs.end();
 }

@@ -1,0 +1,180 @@
+# Code Improvements Tracking
+
+**Branch**: `claude/code-review-011CUenezTtgCChjzrygCVjy`
+**Started**: 2025-10-31
+**Status**: In Progress
+
+This document tracks the implementation of improvements identified in the code review.
+
+---
+
+## Phase 1: Critical Fixes ⚡
+
+### ✅ Completed
+
+- [x] **Task 1.1**: Fix README merge conflict (5 min)
+  - File: `README.md:33`
+  - Removed `>>>>>>> main` merge conflict marker
+  - Completed: 2025-10-31
+
+- [x] **Task 1.2**: Fix ISR race condition (20 min)
+  - Files: `src/main.cpp:7, 28-29, 735-744, 778-779`
+  - Added `#include <atomic>`
+  - Changed `volatile bool` to `std::atomic<bool>`
+  - Changed `volatile unsigned long` to `std::atomic<unsigned long>`
+  - Updated ISR to use `.load()` and `.store()` with proper memory ordering
+  - Updated main loop to use atomic operations
+  - Completed: 2025-10-31
+
+### 📋 Planned
+
+- [ ] **Task 1.3**: Add motor safety limits (1 hour)
+  - File: `src/main.cpp:15-23, 180-242`
+  - Add `validateSafetyLimits()` function
+  - Add `emergencyStop()` function
+  - Status: Pending
+
+---
+
+## Phase 2: High Priority Fixes 🔥
+
+### ✅ Completed
+
+- [x] **Task 2.2**: Extract magic numbers to constants (1 hour)
+  - Files: `src/main.cpp` (C++ side complete)
+  - Created `Config` namespace with constants:
+    - `ENDSTOP_DEBOUNCE_US`, `MAX_PRESET_ID`, `MIN_PRESET_ID`
+    - `PWM_ABS_MIN`, `PWM_ABS_MAX`, `LEGACY_PRESET_SIZE`
+    - `Config::ProtocolID::*` for all protocol special IDs
+  - Replaced all magic numbers in main.cpp with named constants
+  - JavaScript side (`data/index.html`) still needs updating
+  - Completed: 2025-10-31
+
+### 📋 Planned
+
+- [ ] **Task 2.1**: Add comprehensive error logging (1.5 hours)
+  - Files: `src/main.cpp`, `src/WebBridge.cpp`
+  - Add LOG macro with levels
+  - Log all error conditions
+  - Status: Pending
+
+- [ ] **Task 2.3**: Eliminate code duplication (1.5 hours)
+  - File: `src/main.cpp`
+  - Extract `broadcastAllParameters()`
+  - Extract `scanActivePresetCount()`
+  - Status: Pending
+
+- [ ] **Task 2.4**: Improve NVS error handling (1.5 hours)
+  - File: `src/main.cpp:478-511, 596-707`
+  - Create `SafePrefs` wrapper class
+  - Check all NVS operations
+  - Status: Pending
+
+---
+
+## Phase 3: Medium Priority Improvements 🔧
+
+### 📋 Planned
+
+- [ ] **Task 3.1**: Refactor command handling (3 hours)
+  - Use command dispatch table
+  - Status: Pending
+
+- [ ] **Task 3.2**: Split HTML into modules (4 hours)
+  - Create separate JS files
+  - Status: Pending
+
+- [ ] **Task 3.3**: Debounce WebSocket cleanup (30 min)
+  - Optimize `WebBridge_loop()`
+  - Status: Pending
+
+- [ ] **Task 3.4**: Optimize preset scanning (1 hour)
+  - Maintain count incrementally
+  - Status: Pending
+
+---
+
+## Phase 4: Nice-to-Have 🎯
+
+### 📋 Planned
+
+- [ ] **Task 4.1**: Add unit tests
+- [ ] **Task 4.2**: Add documentation (protocol, architecture, wiring)
+- [ ] **Task 4.3**: Add state machine for preset protocol
+
+---
+
+## Testing Checklist
+
+### Phase 1 Tests
+- [ ] README renders correctly without merge conflicts
+- [ ] Endstop triggers 100x without issues
+- [ ] Invalid parameters rejected with safety errors
+- [ ] Serial logs show context for all operations
+
+### Phase 2 Tests
+- [ ] Malformed frames logged with details
+- [ ] NVS errors handled gracefully
+- [ ] All presets save/load correctly
+- [ ] No performance regression
+
+### Phase 3 Tests
+- [ ] Web UI works in multiple browsers
+- [ ] All UI interactions functional
+- [ ] 24-hour stability test passes
+- [ ] Heap usage remains stable
+
+---
+
+## Notes
+
+### Skipped Tasks
+- WiFi password protection (user preference - keeping open AP for now)
+
+### Issues Encountered
+
+None yet.
+
+### Decisions Made
+
+- Using `std::atomic` instead of `volatile` for ISR variables
+- Creating `Config` namespace for all constants
+- Keeping backward compatibility for 86-byte preset format
+
+---
+
+## Quick Reference
+
+### Build Commands
+```bash
+# Build firmware
+pio run
+
+# Upload firmware
+pio run -t upload
+
+# Upload filesystem (web UI)
+pio run -t uploadfs
+
+# Build web assets
+npm run build-web
+```
+
+### Test Commands
+```bash
+# Monitor serial output
+pio device monitor
+
+# Run tests (when implemented)
+pio test
+```
+
+---
+
+**Last Updated**: 2025-10-31
+
+## Change Log
+- **2025-10-31**: Initial creation
+- **2025-10-31**: Completed Task 1.1 (README merge conflict)
+- **2025-10-31**: Completed Task 1.2 (ISR race condition fix)
+- **2025-10-31**: Completed Task 2.2 (Extract magic numbers - C++ side)
