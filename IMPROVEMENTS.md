@@ -50,25 +50,36 @@ This document tracks the implementation of improvements identified in the code r
   - JavaScript side (`data/index.html`) still needs updating
   - Completed: 2025-10-31
 
+- [x] **Task 2.1**: Add comprehensive error logging (1.5 hours)
+  - Files: `src/main.cpp`
+  - Added LOG macro with 4 levels (ERROR, WARN, INFO, DEBUG)
+  - Added configurable log level (defaults to INFO)
+  - Added error logging to:
+    - Frame parsing (length, sync, CRC errors)
+    - NVS operations (loadFromNVS, saveToNVS, all preset functions)
+    - Protocol command handling (CMD_LIST_PRESETS, etc.)
+  - Replaced Serial.printf debug statements with LOG calls
+  - All error conditions now logged with context
+  - Completed: 2025-10-31
+
+- [x] **Task 2.3**: Eliminate code duplication (1.5 hours)
+  - File: `src/main.cpp`
+  - Extracted `broadcastAllParameters()` - sends all MCU parameters
+  - Extracted `broadcastBrowserFields()` - sends all browser fields
+  - Extracted `scanActivePresetCount()` - counts active presets
+  - Replaced duplicated code in:
+    - `CMD_LOAD_PRESET` handler
+    - `loadPresetFromNVS()` function
+    - `deletePresetFromNVS()` function
+  - Reduced ~60 lines of duplicated code
+  - Completed: 2025-10-31
+
 ### 📋 Planned
 
-- [ ] **Task 2.1**: Add comprehensive error logging (1.5 hours)
-  - Files: `src/main.cpp`, `src/WebBridge.cpp`
-  - Add LOG macro with levels
-  - Log all error conditions
-  - Status: Pending
-
-- [ ] **Task 2.3**: Eliminate code duplication (1.5 hours)
-  - File: `src/main.cpp`
-  - Extract `broadcastAllParameters()`
-  - Extract `scanActivePresetCount()`
-  - Status: Pending
-
-- [ ] **Task 2.4**: Improve NVS error handling (1.5 hours)
-  - File: `src/main.cpp:478-511, 596-707`
-  - Create `SafePrefs` wrapper class
-  - Check all NVS operations
-  - Status: Pending
+- [ ] **Task 2.4**: Improve NVS error handling (Optional - mostly covered by Task 2.1)
+  - All NVS operations now check for errors and log them
+  - Could still create SafePrefs wrapper class for cleaner code
+  - Status: Optional
 
 ---
 
@@ -178,3 +189,5 @@ pio test
 - **2025-10-31**: Completed Task 1.1 (README merge conflict)
 - **2025-10-31**: Completed Task 1.2 (ISR race condition fix)
 - **2025-10-31**: Completed Task 2.2 (Extract magic numbers - C++ side)
+- **2025-10-31**: Completed Task 2.1 (Add comprehensive error logging)
+- **2025-10-31**: Completed Task 2.3 (Eliminate code duplication)

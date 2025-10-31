@@ -57,6 +57,24 @@ namespace Config {
   }
 }
 
+/* =====================  LOGGING SYSTEM  ========================== */
+enum LogLevel { LOG_ERROR = 0, LOG_WARN = 1, LOG_INFO = 2, LOG_DEBUG = 3 };
+
+#ifndef CURRENT_LOG_LEVEL
+  #define CURRENT_LOG_LEVEL LOG_INFO
+#endif
+
+#define LOG(level, fmt, ...) \
+  do { \
+    if ((level) <= CURRENT_LOG_LEVEL) { \
+      const char* level_str = \
+        (level) == LOG_ERROR ? "ERROR" : \
+        (level) == LOG_WARN  ? "WARN " : \
+        (level) == LOG_INFO  ? "INFO " : "DEBUG"; \
+      Serial.printf("[%s] " fmt "\n", level_str, ##__VA_ARGS__); \
+    } \
+  } while(0)
+
 /* —— debounce for ENDSTOP —— */
 constexpr unsigned long DEBOUNCE_US = Config::ENDSTOP_DEBOUNCE_US;
 std::atomic<unsigned long> lastEndstopMicros{0};
@@ -178,6 +196,9 @@ void loadPresetFromNVS(uint8_t presetId);
 uint8_t getPresetCount();
 void deletePresetFromNVS(uint8_t presetId);
 void savePresetToNVSWithData(uint8_t presetId, const Preset& presetData);
+void broadcastAllParameters();
+void broadcastBrowserFields(const Preset& preset);
+uint8_t scanActivePresetCount();
 
 /* =====================  TRANSPORT LAYER  ======================== *
  * Build a frame once → ship it over Serial **and** WebSocket      */
@@ -296,10 +317,61 @@ void sendFrame(uint8_t cmd, uint8_t id, float val)
   transmitFrame(frame, pos);
 }
 
+/* =====================  HELPER FUNCTIONS  ======================= */
+void broadcastAllParameters()
+{
+  sendFrame(CMD_ACK, ParamID_RISE_TIME_MS, riseTime);
+  sendFrame(CMD_ACK, ParamID_FALL_TIME_MS, fallTime);
+  sendFrame(CMD_ACK, ParamID_HOLD_HIGH_MS, stayHigh);
+  sendFrame(CMD_ACK, ParamID_HOLD_LOW_MS, stayLow);
+  sendFrame(CMD_ACK, ParamID_MIN_ANGLE_DEG, minAngle);
+  sendFrame(CMD_ACK, ParamID_MAX_ANGLE_DEG, maxAngle);
+  sendFrame(CMD_ACK, ParamID_STEPS_PER_SEC, speedStepsPerSec);
+  sendFrame(CMD_ACK, ParamID_SERVO_PWM_MIN_US, servoPwmMin);
+  sendFrame(CMD_ACK, ParamID_SERVO_PWM_MAX_US, servoPwmMax);
+  sendFrame(CMD_ACK, ParamID_RUN_YOKE, yokeRunning ? 1.0f : 0.0f);
+  sendFrame(CMD_ACK, ParamID_RUN_CONVEYOR, conveyorRunning ? 1.0f : 0.0f);
+}
+
+void broadcastBrowserFields(const Preset& preset)
+{
+  sendFrame(CMD_ACK, 0x20, preset.feedRate);
+  sendFrame(CMD_ACK, 0x21, preset.loopHeightInput);
+  sendFrame(CMD_ACK, 0x22, preset.loopLength);
+  sendFrame(CMD_ACK, 0x23, preset.retractLength);
+  sendFrame(CMD_ACK, 0x24, preset.degSec);
+  sendFrame(CMD_ACK, 0x25, preset.yokeLength);
+  sendFrame(CMD_ACK, 0x26, preset.muSteps);
+  sendFrame(CMD_ACK, 0x27, preset.degStep);
+  sendFrame(CMD_ACK, 0x28, preset.driveDiameter);
+  sendFrame(CMD_ACK, 0x29, preset.minAngleRaw);
+  sendFrame(CMD_ACK, 0x2A, preset.servoPwmMinUser);
+  sendFrame(CMD_ACK, 0x2B, preset.servoPwmMaxUser);
+}
+
+uint8_t scanActivePresetCount()
+{
+  uint8_t count = 0;
+  for (uint8_t i = Config::MIN_PRESET_ID; i <= Config::MAX_PRESET_ID; i++) {
+    if (prefs.isKey(String(i).c_str())) {
+      count++;
+    }
+  }
+  return count;
+}
+
 /* =====================  WS → MCU PARSER  (NEW) ================= */
 void processIncomingFrame(uint8_t *buf, size_t len)
 {
-  if (len != 8 || buf[0] != SYNC) return;
+  if (len != 8) {
+    LOG(LOG_ERROR, "Bad frame length: %d (expected 8)", len);
+    return;
+  }
+
+  if (buf[0] != SYNC) {
+    LOG(LOG_ERROR, "Bad sync byte: 0x%02X (expected 0xAA)", buf[0]);
+    return;
+  }
 
   uint8_t cmd = buf[1], id = buf[2];
   FloatBytes fb; memcpy(fb.b, &buf[3], 4);
@@ -307,7 +379,14 @@ void processIncomingFrame(uint8_t *buf, size_t len)
 
   uint8_t calc = cmd ^ id;
   for (uint8_t b : fb.b) calc ^= b;
-  if (calc != rxCrc) return;
+
+  if (calc != rxCrc) {
+    LOG(LOG_ERROR, "CRC mismatch: got 0x%02X, expected 0x%02X (cmd=0x%02X, id=0x%02X)",
+        rxCrc, calc, cmd, id);
+    return;
+  }
+
+  LOG(LOG_DEBUG, "RX cmd=0x%02X id=0x%02X val=%.2f", cmd, id, fb.f);
 
   if (cmd == CMD_SAVE_NVS) {
       saveToNVS();
@@ -329,28 +408,19 @@ void processIncomingFrame(uint8_t *buf, size_t len)
   else if (cmd == CMD_LOAD_PRESET) {
     uint8_t presetId = constrain((uint8_t)fb.f, Config::MIN_PRESET_ID, Config::MAX_PRESET_ID);
     loadPresetFromNVS(presetId);
-
-    // Send all parameters back
-    sendFrame(CMD_ACK, ParamID_RISE_TIME_MS, riseTime);
-    sendFrame(CMD_ACK, ParamID_FALL_TIME_MS, fallTime);
-    sendFrame(CMD_ACK, ParamID_HOLD_HIGH_MS, stayHigh);
-    sendFrame(CMD_ACK, ParamID_HOLD_LOW_MS, stayLow);
-    sendFrame(CMD_ACK, ParamID_MIN_ANGLE_DEG, minAngle);
-    sendFrame(CMD_ACK, ParamID_MAX_ANGLE_DEG, maxAngle);
-    sendFrame(CMD_ACK, ParamID_STEPS_PER_SEC, speedStepsPerSec);
-    sendFrame(CMD_ACK, ParamID_SERVO_PWM_MIN_US, servoPwmMin);
-    sendFrame(CMD_ACK, ParamID_SERVO_PWM_MAX_US, servoPwmMax);
-    sendFrame(CMD_ACK, ParamID_RUN_YOKE, yokeRunning ? 1.0f : 0.0f);
-    sendFrame(CMD_ACK, ParamID_RUN_CONVEYOR, conveyorRunning ? 1.0f : 0.0f);
-
+    broadcastAllParameters();
     sendFrame(CMD_ACK, Config::ProtocolID::PRESET_LOAD_END, presetId);
     return;
   }
   else if (cmd == CMD_LIST_PRESETS) {
-    prefs.begin("presets", true);
-    uint8_t count = prefs.getUChar("count", 0);
+    if (!prefs.begin("presets", true)) {
+      LOG(LOG_ERROR, "Failed to open NVS namespace 'presets' for listing");
+      return;
+    }
 
-    Serial.printf("[DEBUG] Sending preset count: %d\n", count);
+    uint8_t count = prefs.getUChar("count", 0);
+    LOG(LOG_INFO, "Listing %d presets", count);
+
     sendFrame(CMD_ACK, Config::ProtocolID::PRESET_COUNT, count);
 
     // Send each existing preset ID and name
@@ -358,7 +428,7 @@ void processIncomingFrame(uint8_t *buf, size_t len)
       if (prefs.isKey(String(i).c_str())) {
         Preset preset = {};
         prefs.getBytes(String(i).c_str(), &preset, sizeof(Preset));
-        Serial.printf("[DEBUG] Found preset ID: %d name: %s\n", i, preset.name);
+        LOG(LOG_DEBUG, "Found preset ID %d: '%s'", i, preset.name);
         sendFrame(CMD_ACK, Config::ProtocolID::PRESET_EXISTS, i);
         for (uint8_t c = 0; c < 8; c++) {
           FloatBytes fbName;
@@ -368,7 +438,7 @@ void processIncomingFrame(uint8_t *buf, size_t len)
       }
     }
 
-    Serial.println("[DEBUG] Sending list end marker");
+    LOG(LOG_DEBUG, "Preset list complete");
     sendFrame(CMD_ACK, Config::ProtocolID::LIST_END, 0);
 
     prefs.end();
@@ -512,9 +582,19 @@ void processSerial()
 /* =====================  Load Presets (NVS)  ===================== */
 void loadFromNVS()
 {
-  prefs.begin("params", true);        // read-only
+  if (!prefs.begin("params", true)) {
+    LOG(LOG_ERROR, "Failed to open NVS namespace 'params' for reading");
+    return;
+  }
+
+  LOG(LOG_INFO, "Loading parameters from NVS");
+
   auto get = [&](const char* key, float fallback){
-    return prefs.isKey(key) ? prefs.getFloat(key) : fallback;
+    if (!prefs.isKey(key)) {
+      LOG(LOG_WARN, "Key '%s' not found in NVS, using default %.2f", key, fallback);
+      return fallback;
+    }
+    return prefs.getFloat(key);
   };
 
   riseTime         = get("rise",  riseTime);
@@ -527,12 +607,20 @@ void loadFromNVS()
   servoPwmMin      = get("pwmMin", servoPwmMin);
   servoPwmMax      = get("pwmMax", servoPwmMax);
   prefs.end();
+
+  LOG(LOG_INFO, "Parameters loaded successfully");
 }
 
 /* =====================  Save Presets (NVS)  ===================== */
 void saveToNVS()
 {
-  prefs.begin("params", false);   // read-write
+  if (!prefs.begin("params", false)) {
+    LOG(LOG_ERROR, "Failed to open NVS namespace 'params' for writing");
+    return;
+  }
+
+  LOG(LOG_INFO, "Saving parameters to NVS");
+
   prefs.putFloat("rise",  riseTime);
   prefs.putFloat("fall",  fallTime);
   prefs.putFloat("hHigh", stayHigh);
@@ -543,6 +631,8 @@ void saveToNVS()
   prefs.putFloat("pwmMin", servoPwmMin);
   prefs.putFloat("pwmMax", servoPwmMax);
   prefs.end();
+
+  LOG(LOG_INFO, "Parameters saved successfully");
 }
 
 /* =====================  SERVO STATE MACHINE  ==================== */
@@ -629,9 +719,18 @@ void updateServo()
 
 /* =====================  IMPROVED PRESET MANAGEMENT (PURE BINARY) ============= */
 void savePresetToNVS(uint8_t presetId) {
-  if (presetId < Config::MIN_PRESET_ID || presetId > Config::MAX_PRESET_ID) return;
-  
-  prefs.begin("presets", false);
+  if (presetId < Config::MIN_PRESET_ID || presetId > Config::MAX_PRESET_ID) {
+    LOG(LOG_ERROR, "Invalid preset ID: %d (must be %d-%d)",
+        presetId, Config::MIN_PRESET_ID, Config::MAX_PRESET_ID);
+    return;
+  }
+
+  if (!prefs.begin("presets", false)) {
+    LOG(LOG_ERROR, "Failed to open NVS namespace 'presets' for writing");
+    return;
+  }
+
+  LOG(LOG_INFO, "Saving preset ID %d to NVS", presetId);
   
   // Use struct for cleaner code - no strings, no magic numbers
   Preset preset = {
@@ -649,14 +748,15 @@ void savePresetToNVS(uint8_t presetId) {
   snprintf(preset.name, sizeof(preset.name), "Preset %u", presetId);
   
   // Save binary preset data directly using preset ID as key
-  prefs.putBytes(String(presetId).c_str(), &preset, sizeof(Preset));
-  Serial.printf("[DEBUG] Saved preset ID %d, size: %d bytes\n", presetId, sizeof(Preset));
-  
+  size_t written = prefs.putBytes(String(presetId).c_str(), &preset, sizeof(Preset));
+
   // Verify it was saved
-  if (prefs.isKey(String(presetId).c_str())) {
-    Serial.printf("[DEBUG] Preset %d successfully saved to NVS\n", presetId);
+  if (written == sizeof(Preset) && prefs.isKey(String(presetId).c_str())) {
+    LOG(LOG_DEBUG, "Preset %d saved successfully (%d bytes)", presetId, sizeof(Preset));
   } else {
-    Serial.printf("[DEBUG] ERROR: Preset %d NOT found in NVS after save!\n", presetId);
+    LOG(LOG_ERROR, "Failed to save preset %d to NVS", presetId);
+    prefs.end();
+    return;
   }
   
   // Update preset count
@@ -678,17 +778,45 @@ void savePresetToNVS(uint8_t presetId) {
 }
 
 void loadPresetFromNVS(uint8_t presetId) {
-  if (presetId < Config::MIN_PRESET_ID || presetId > Config::MAX_PRESET_ID) return;
-  
-  prefs.begin("presets", true);
+  if (presetId < Config::MIN_PRESET_ID || presetId > Config::MAX_PRESET_ID) {
+    LOG(LOG_ERROR, "Invalid preset ID: %d (must be %d-%d)",
+        presetId, Config::MIN_PRESET_ID, Config::MAX_PRESET_ID);
+    return;
+  }
+
+  if (!prefs.begin("presets", true)) {
+    LOG(LOG_ERROR, "Failed to open NVS namespace 'presets' for reading");
+    return;
+  }
+
+  LOG(LOG_INFO, "Loading preset ID %d from NVS", presetId);
+
   size_t dataSize = prefs.getBytesLength(String(presetId).c_str());
 
-  if (dataSize == sizeof(Preset) || dataSize == Config::LEGACY_PRESET_SIZE) {
-    Preset preset = {};
-    size_t bytesRead = prefs.getBytes(String(presetId).c_str(), &preset, min(dataSize, sizeof(Preset)));
+  if (dataSize == 0) {
+    LOG(LOG_ERROR, "Preset %d not found in NVS", presetId);
     prefs.end();
+    return;
+  }
 
-    if (bytesRead == dataSize) {
+  if (dataSize != sizeof(Preset) && dataSize != Config::LEGACY_PRESET_SIZE) {
+    LOG(LOG_ERROR, "Preset %d has invalid size: %d bytes (expected %d or %d)",
+        presetId, dataSize, sizeof(Preset), Config::LEGACY_PRESET_SIZE);
+    prefs.end();
+    return;
+  }
+
+  Preset preset = {};
+  size_t bytesRead = prefs.getBytes(String(presetId).c_str(), &preset, min(dataSize, sizeof(Preset)));
+  prefs.end();
+
+  if (bytesRead != dataSize) {
+    LOG(LOG_ERROR, "Failed to read preset %d: got %d bytes, expected %d",
+        presetId, bytesRead, dataSize);
+    return;
+  }
+
+  if (bytesRead == dataSize) {
       // Apply MCU values
       riseTime = constrain(preset.riseTime, 1.0f, 10000.0f);
       fallTime = constrain(preset.fallTime, 1.0f, 10000.0f);
@@ -706,39 +834,14 @@ void loadPresetFromNVS(uint8_t presetId) {
       myServo.attach(PWM_PIN, servoPwmMin, servoPwmMax);
       stepper.setMaxSpeed(speedStepsPerSec);
       stepper.setSpeed(speedStepsPerSec);
-      
-      // Send MCU parameters
-      sendFrame(CMD_ACK, ParamID_RISE_TIME_MS, riseTime);
-      sendFrame(CMD_ACK, ParamID_FALL_TIME_MS, fallTime);
-      sendFrame(CMD_ACK, ParamID_HOLD_HIGH_MS, stayHigh);
-      sendFrame(CMD_ACK, ParamID_HOLD_LOW_MS, stayLow);
-      sendFrame(CMD_ACK, ParamID_MIN_ANGLE_DEG, minAngle);
-      sendFrame(CMD_ACK, ParamID_MAX_ANGLE_DEG, maxAngle);
-      sendFrame(CMD_ACK, ParamID_STEPS_PER_SEC, speedStepsPerSec);
-      sendFrame(CMD_ACK, ParamID_SERVO_PWM_MIN_US, servoPwmMin);
-      sendFrame(CMD_ACK, ParamID_SERVO_PWM_MAX_US, servoPwmMax);
-      sendFrame(CMD_ACK, ParamID_RUN_YOKE, yokeRunning ? 1.0f : 0.0f);
-      sendFrame(CMD_ACK, ParamID_RUN_CONVEYOR, conveyorRunning ? 1.0f : 0.0f);
-      
-      // Send browser fields
-      sendFrame(CMD_ACK, 0x20, preset.feedRate);
-      sendFrame(CMD_ACK, 0x21, preset.loopHeightInput);
-      sendFrame(CMD_ACK, 0x22, preset.loopLength);
-      sendFrame(CMD_ACK, 0x23, preset.retractLength);
-      sendFrame(CMD_ACK, 0x24, preset.degSec);
-      sendFrame(CMD_ACK, 0x25, preset.yokeLength);
-      sendFrame(CMD_ACK, 0x26, preset.muSteps);
-      sendFrame(CMD_ACK, 0x27, preset.degStep);
-      sendFrame(CMD_ACK, 0x28, preset.driveDiameter);
-      sendFrame(CMD_ACK, 0x29, preset.minAngleRaw);
-      sendFrame(CMD_ACK, 0x2A, preset.servoPwmMinUser);
-      sendFrame(CMD_ACK, 0x2B, preset.servoPwmMaxUser);
-      
-      sendFrame(CMD_ACK, 0xF2, presetId);  // End marker
+
+      // Broadcast all parameters
+      broadcastAllParameters();
+      broadcastBrowserFields(preset);
+      sendFrame(CMD_ACK, Config::ProtocolID::PRESET_LOAD_END, presetId);
+
+      LOG(LOG_INFO, "Preset %d loaded successfully", presetId);
     }
-  } else {
-    prefs.end();
-  }
 }
 
 uint8_t getPresetCount() {
@@ -751,18 +854,20 @@ uint8_t getPresetCount() {
 void deletePresetFromNVS(uint8_t presetId) {
   if (presetId < Config::MIN_PRESET_ID || presetId > Config::MAX_PRESET_ID) return;
   
-  prefs.begin("presets", false);
-  prefs.remove(String(presetId).c_str());
-  
-  // Update count (scan for remaining presets)
-  uint8_t activeCount = 0;
-  for (uint8_t i = Config::MIN_PRESET_ID; i <= Config::MAX_PRESET_ID; i++) {
-    if (prefs.isKey(String(i).c_str())) {
-      activeCount++;
-    }
+  if (!prefs.begin("presets", false)) {
+    LOG(LOG_ERROR, "Failed to open NVS namespace 'presets' for deletion");
+    return;
   }
+
+  LOG(LOG_INFO, "Deleting preset ID %d", presetId);
+  prefs.remove(String(presetId).c_str());
+
+  // Update count
+  uint8_t activeCount = scanActivePresetCount();
   prefs.putUChar("count", activeCount);
   prefs.end();
+
+  LOG(LOG_INFO, "Preset %d deleted, %d presets remaining", presetId, activeCount);
 }
 
 /* =====================  ISR  ================================== */
